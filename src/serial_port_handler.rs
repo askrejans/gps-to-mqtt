@@ -1,0 +1,91 @@
+use crate::config::AppConfig;
+use crate::gps_data_parser::process_gps_data;
+use serialport::SerialPort;
+
+/// Set up and open a serial port based on the provided configuration.
+///
+/// This function takes an `AppConfig` reference, lists available serial ports, opens and configures
+/// the specified serial port, and returns a boxed trait object representing the serial port.
+///
+/// # Arguments
+///
+/// * `config` - A reference to the `AppConfig` struct containing serial port configuration information.
+///
+/// # Panics
+///
+/// Panics if there are no available serial ports or if there is an error opening the specified port.
+///
+/// # Returns
+///
+/// Returns a boxed trait object representing the opened serial port.
+pub fn setup_serial_port(config: &AppConfig) -> Box<dyn SerialPort> {
+    // Listing available serial ports.
+    let ports = serialport::available_ports().expect("No ports found!");
+    for p in ports {
+        println!("Opening port: {}", p.port_name);
+    }
+
+    // Opening and configuring the specified serial port.
+    let mut port = serialport::new(&config.port_name, config.baud_rate as u32)
+        .timeout(std::time::Duration::from_millis(10))
+        .open()
+        .expect("Failed to open port");
+
+    if config.set_gps_to_10hz {
+        println!("Setting GPS sample rate to 10Hz");
+        gps_resolution_to_10hz(&mut port);
+    }
+    port
+}
+
+/// Read data from the provided serial port and process it.
+///
+/// This function takes a mutable reference to a boxed trait object representing a serial port,
+/// continuously reads data from the port, and processes the received data using the `process_data` function.
+///
+/// # Arguments
+///
+/// * `port` - A mutable reference to a boxed trait object representing a serial port.
+pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
+    // Buffer to store received serial data.
+    let mut serial_buf: Vec<u8> = vec![0; 256];
+
+    // Continuously read data from the serial port.
+    loop {
+        match port.read(serial_buf.as_mut_slice()) {
+            Ok(t) => {
+                if t > 0 {
+                    // Process and print the received data.
+                    let data = &serial_buf[0..t];
+                    process_gps_data(data, config);
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => (),
+            Err(e) => eprintln!("{:?}", e),
+        }
+    }
+}
+
+/// Increases GPS resolution to 10Hz (ublox GPS device)
+///
+/// UBX -> CFG -> RATE command to 10Hz
+///
+/// # Arguments
+///
+/// * `port` - A mutable reference to a boxed trait object representing a serial port.
+pub fn gps_resolution_to_10hz(port: &mut Box<dyn SerialPort>) {
+    // Bytes to send to the device.
+    let bytes_to_send: Vec<u8> = vec![
+        0xB5, 0x62, 0x06, 0x08, 0x06, 0x00, 0x64, 0x00, 0x01, 0x00, 0x01, 0x00, 0x7A, 0x12,
+    ];
+
+    // Send the bytes to the device.
+    match port.write_all(&bytes_to_send) {
+        Ok(_) => {
+            println!("Sample rate set successfully!");
+        }
+        Err(e) => {
+            eprintln!("Error sending bytes to set sample rate: {:?}", e);
+        }
+    }
+}
