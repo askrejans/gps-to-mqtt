@@ -309,29 +309,43 @@ fn parse_and_display_gll(data: &str) {
 }
 
 fn parse_latitude(value: &str, direction: &str) -> f64 {
-    // Extract degrees and minutes from the raw NMEA format
-    let degrees: f64 = FromStr::from_str(&value[..2]).unwrap_or(0.0);
-    let minutes: f64 = FromStr::from_str(&value[2..]).unwrap_or(0.0);
+    // Ensure the input strings have sufficient length
+    if value.len() >= 2 && direction.len() == 1 {
+        // Extract degrees and minutes from the raw NMEA format
+        let degrees: f64 = FromStr::from_str(&value[..2]).unwrap_or(0.0);
+        let minutes: f64 = FromStr::from_str(&value[2..]).unwrap_or(0.0);
 
-    // Convert to decimal degrees and consider direction
-    let result = degrees + minutes / 60.0;
-    if direction == "S" {
-        -result
+        // Convert to decimal degrees and consider direction
+        let result = degrees + minutes / 60.0;
+        if direction == "S" {
+            return -result;
+        } else {
+            return result;
+        }
     } else {
-        result
+        // Handle the case where the input strings are not valid
+        println!("Invalid latitude input: {}{}", value, direction);
+        return 0.0;
     }
 }
 
 fn parse_longitude(value: &str, direction: &str) -> f64 {
-    // Extract degrees and minutes from the raw NMEA format
-    let degrees: f64 = FromStr::from_str(&value[..3]).unwrap_or(0.0);
-    let minutes: f64 = FromStr::from_str(&value[3..]).unwrap_or(0.0);
+    // Ensure the input strings have sufficient length
+    if value.len() >= 3 && direction.len() == 1 {
+        // Extract degrees and minutes from the raw NMEA format
+        let degrees: f64 = FromStr::from_str(&value[..3]).unwrap_or(0.0);
+        let minutes: f64 = FromStr::from_str(&value[3..]).unwrap_or(0.0);
 
-    // Convert to decimal degrees and consider direction
-    let result = degrees + minutes / 60.0;
-    if direction == "W" {
-        -result
+        // Convert to decimal degrees and consider direction
+        let result = degrees + minutes / 60.0;
+        if direction == "W" {
+            return -result;
+        } else {
+            return result;
+        }
     } else {
-        result
+        // Handle the case where the input strings are not valid
+        println!("Invalid longitude input: {}{}", value, direction);
+        return 0.0;
     }
 }
