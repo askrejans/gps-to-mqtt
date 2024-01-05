@@ -14,7 +14,7 @@ This Rust project is designed to read data from a USB GPS dongle in NMEA-0183 fo
 
 ### Device Compatibility
 
-This project has been tested with a specific USB dongle (TOPGNSS GN800G). Compatibility with other devices is not guaranteed.
+This project has been tested with a specific USB dongle (TOPGNSS GN800G with M8030-KT chipset). Compatibility with other devices is not guaranteed.
 
 ### 10Hz Mode Toggle
 
