@@ -2,6 +2,7 @@ use crate::config::AppConfig;
 use crate::gps_data_parser::process_gps_data;
 use crate::mqtt_handler::setup_mqtt;
 use serialport::SerialPort;
+use std::io;
 
 /// Set up and open a serial port based on the provided configuration.
 ///
@@ -50,6 +51,13 @@ pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
 
     // Continuously read data from the serial port.
     loop {
+
+        // Check if the user wants to quit.
+        if check_quit() {
+            // Properly exit the program
+            std::process::exit(0);
+        }
+
         match port.read(serial_buf.as_mut_slice()) {
             Ok(t) => {
                 if t > 0 {
@@ -86,4 +94,16 @@ pub fn gps_resolution_to_10hz(port: &mut Box<dyn SerialPort>) {
             eprintln!("Error sending bytes to set sample rate: {:?}", e);
         }
     }
+}
+
+/// Check if the user wants to quit by entering 'q' + Enter.
+fn check_quit() -> bool {
+    // Create a buffer to read user input
+    let mut input_buffer = String::new();
+
+    // Read input from the user
+    io::stdin().read_line(&mut input_buffer).expect("Failed to read input");
+
+    // Check if the input is 'q'
+    input_buffer.trim() == "q"
 }

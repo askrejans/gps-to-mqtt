@@ -30,7 +30,9 @@ use serial_port_handler::{read_from_port, setup_serial_port};
 /// Displays a graphical welcome message.
 fn display_welcome() {
     println!("\nWelcome to GPS Data Processor!\n");
-    println!("===================================");
+    println!("==========================================");
+    println!("Press 'q' + Enter to quit the application.");
+    println!("==========================================\n");
 }
 
 fn main() {
