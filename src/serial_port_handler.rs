@@ -19,15 +19,11 @@ use serialport::SerialPort;
 ///
 /// Returns a boxed trait object representing the opened serial port.
 pub fn setup_serial_port(config: &AppConfig) -> Box<dyn SerialPort> {
-    // Listing available serial ports.
-    let ports = serialport::available_ports().expect("No ports found!");
-    for p in ports {
-        println!("Opening port: {}", p.port_name);
-    }
 
     // Opening and configuring the specified serial port.
+    println!("Opening port: {}", config.port_name);
     let mut port = serialport::new(&config.port_name, config.baud_rate as u32)
-        .timeout(std::time::Duration::from_millis(10))
+        .timeout(std::time::Duration::from_millis(1000))
         .open()
         .expect("Failed to open port");
 
@@ -48,7 +44,7 @@ pub fn setup_serial_port(config: &AppConfig) -> Box<dyn SerialPort> {
 /// * `port` - A mutable reference to a boxed trait object representing a serial port.
 pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
     // Buffer to store received serial data.
-    let mut serial_buf: Vec<u8> = vec![0; 256];
+    let mut serial_buf: Vec<u8> = vec![0; 1024];
 
     // Continuously read data from the serial port.
     loop {

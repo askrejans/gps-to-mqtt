@@ -37,7 +37,7 @@ pub fn process_gps_data(data: &[u8], config: &AppConfig) {
             || cleaned_sentence.starts_with("GAGSV")
         {
             // Parse and display GSV sentence.
-            parse_and_display_gsv(cleaned_sentence);
+            //parse_and_display_gsv(cleaned_sentence);
         } else if cleaned_sentence.starts_with("GNGGA") {
             // Parse and display GGA sentence.
             parse_and_display_gga(cleaned_sentence, mqtt, config);
@@ -49,13 +49,13 @@ pub fn process_gps_data(data: &[u8], config: &AppConfig) {
             parse_and_display_vtg(cleaned_sentence, mqtt, config);
         } else if cleaned_sentence.starts_with("GNGSA") {
             // Parse and display GSA sentence.
-            parse_and_display_gsa(cleaned_sentence);
+            //parse_and_display_gsa(cleaned_sentence);
         } else if cleaned_sentence.starts_with("GNGLL") {
             // Parse and display GLL sentence.
-            parse_and_display_gll(cleaned_sentence);
+            //parse_and_display_gll(cleaned_sentence);
         } else if cleaned_sentence.starts_with("GNTXT") {
             // Parse and display GNTXT sentence.
-            parse_and_display_gntxt(cleaned_sentence);
+            //parse_and_display_gntxt(cleaned_sentence);
         } else {
             // Unknown sentence type, just print the raw data.
             println!("Unknown Sentence Type: {}", cleaned_sentence);
@@ -101,11 +101,6 @@ fn parse_and_display_gga(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let altitude: f64 = FromStr::from_str(parts[9]).unwrap_or(0.0);
         let fix_quality: usize = FromStr::from_str(parts[6]).unwrap_or(0);
 
-        println!(
-            "GGA Sentence - Latitude: {}, Longitude: {}, Altitude: {}, Fix Quality: {}",
-            latitude, longitude, altitude, fix_quality
-        );
-
         // Push altitude to MQTT
         if let Err(e) = publish_message(
             &mqtt,
@@ -143,13 +138,7 @@ fn parse_and_display_rmc(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let (hour, minute, second) = parse_utc_time(utc_time);
         let (day, month, year) = parse_date(date);
 
-        println!(
-            "RMC Sentence - UTC Time: {:02}:{:02}:{:02}, Date: 20{}.{:02}.{:02} - Latitude: {}, Longitude: {}, Speed: {}km/h",
-            hour, minute, second, year, month, day, latitude, longitude, speed
-        );
-
         // Push time to MQTT
-
         let current_time = format!("{:02}:{:02}:{:02}", hour, minute, second);
 
         let mut last_published_time = LAST_PUBLISHED_TIME.lock().unwrap();
@@ -233,11 +222,6 @@ fn parse_and_display_vtg(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let course: f64 = FromStr::from_str(parts[1]).unwrap_or(0.0);
         let speed_knots: f64 = FromStr::from_str(parts[5]).unwrap_or(0.0);
         let speed_kph: f64 = FromStr::from_str(parts[7]).unwrap_or(0.0);
-
-        println!(
-            "VTG Sentence - Course: {}, Speed (Knots): {}, Speed (KPH): {}",
-            course, speed_knots, speed_kph
-        );
 
         // Push course to MQTT
         if let Err(e) = publish_message(
