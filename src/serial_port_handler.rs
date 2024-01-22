@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::gps_data_parser::process_gps_data;
+use crate::mqtt_handler::setup_mqtt;
 use serialport::SerialPort;
 
 /// Set up and open a serial port based on the provided configuration.
@@ -45,6 +46,7 @@ pub fn setup_serial_port(config: &AppConfig) -> Box<dyn SerialPort> {
 pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
     // Buffer to store received serial data.
     let mut serial_buf: Vec<u8> = vec![0; 1024];
+    let mqtt = setup_mqtt(&config);
 
     // Continuously read data from the serial port.
     loop {
@@ -53,7 +55,7 @@ pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
                 if t > 0 {
                     // Process and print the received data.
                     let data = &serial_buf[0..t];
-                    process_gps_data(data, config);
+                    process_gps_data(data, config, mqtt.clone());
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => (),

@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::mqtt_handler::{publish_message, setup_mqtt};
+use crate::mqtt_handler::publish_message;
 use paho_mqtt as mqtt;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -19,8 +19,7 @@ lazy_static::lazy_static! {
 /// # Arguments
 ///
 /// * `data` - A slice of bytes representing received data.
-pub fn process_gps_data(data: &[u8], config: &AppConfig) {
-    let mqtt = setup_mqtt(&config);
+pub fn process_gps_data(data: &[u8], config: &AppConfig, mqtt: mqtt::Client) {
 
     // Convert bytes to a string.
     let data_str = String::from_utf8_lossy(data);
