@@ -2,7 +2,10 @@ use crate::config::AppConfig;
 use crate::gps_data_parser::process_gps_data;
 use crate::mqtt_handler::setup_mqtt;
 use serialport::SerialPort;
+use std::io::BufRead;
 use std::io;
+use std::sync::mpsc;
+use std::thread;
 
 /// Set up and open a serial port based on the provided configuration.
 ///
@@ -49,13 +52,23 @@ pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
     let mut serial_buf: Vec<u8> = vec![0; 1024];
     let mqtt = setup_mqtt(&config);
 
+    // Create a channel for communication between threads
+    let (sender, receiver) = mpsc::channel();
+    let sender_clone = sender.clone();
+
+    // Spawn a separate thread for user input
+    thread::spawn(move || {
+        check_quit(sender_clone);
+    });
+
     // Continuously read data from the serial port.
     loop {
-
         // Check if the user wants to quit.
-        if check_quit() {
-            // Properly exit the program
-            std::process::exit(0);
+        if let Ok(message) = receiver.try_recv() {
+            if message == "q" {
+                println!("Received quit command. Exiting the program.");
+                return;
+            }
         }
 
         match port.read(serial_buf.as_mut_slice()) {
@@ -97,13 +110,23 @@ pub fn gps_resolution_to_10hz(port: &mut Box<dyn SerialPort>) {
 }
 
 /// Check if the user wants to quit by entering 'q' + Enter.
-fn check_quit() -> bool {
+fn check_quit(sender: mpsc::Sender<String>) {
     // Create a buffer to read user input
     let mut input_buffer = String::new();
 
-    // Read input from the user
-    io::stdin().read_line(&mut input_buffer).expect("Failed to read input");
+    // Read input from the user asynchronously
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
 
     // Check if the input is 'q'
-    input_buffer.trim() == "q"
+    if let Some(Ok(line)) = lines.next() {
+        if line.trim() == "q" {
+            // Send quit command to the main thread
+            sender.send("q".to_string()).unwrap();
+            return;
+        }
+    }
+
+    // If the input is not 'q', continue checking
+    check_quit(sender);
 }
