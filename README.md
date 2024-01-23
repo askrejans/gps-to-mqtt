@@ -83,6 +83,22 @@ Copy and modify the `example.settings.toml` file to configure the project. Ensur
 3. Copy and modify the `example.settings.toml` file to configure the project.
 4. Run the executable as described in the build instructions.
 
+## MQTT data format
+
+MQTT data is stored under configured topic as 3 letter codes:
+
+- CRS - course in degrees
+- TME - GMT time in HH:MM:SS format
+- DTE - date in dd.mm.YYYY format
+- LAT - latitude
+- LNG - longitude
+- SPD - speed in km/h
+- ALT - altitude in m
+- QTY - fix quality
+
+![image](https://github.com/askrejans/gps-to-mqtt/assets/1042303/37bf6b97-259f-4e90-bbb2-71de8d6aeef1)
+
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE). Feel free to use, modify, and distribute the code as per the license terms.
