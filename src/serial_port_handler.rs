@@ -23,19 +23,26 @@ use std::thread;
 /// # Returns
 ///
 /// Returns a boxed trait object representing the opened serial port.
-pub fn setup_serial_port(config: &AppConfig) -> Box<dyn SerialPort> {
-
+pub fn setup_serial_port(config: &AppConfig) -> Box<dyn serialport::SerialPort> {
     // Opening and configuring the specified serial port.
     println!("Opening port: {}", config.port_name);
-    let mut port = serialport::new(&config.port_name, config.baud_rate as u32)
+
+    let mut port = match serialport::new(&config.port_name, config.baud_rate as u32)
         .timeout(std::time::Duration::from_millis(1000))
         .open()
-        .expect("Failed to open port");
+    {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("Failed to open port: {}", err);
+            std::process::exit(1);
+        }
+    };
 
     if config.set_gps_to_10hz {
         println!("Setting GPS sample rate to 10Hz");
         gps_resolution_to_10hz(&mut port);
     }
+
     port
 }
 
@@ -111,8 +118,6 @@ pub fn gps_resolution_to_10hz(port: &mut Box<dyn SerialPort>) {
 
 /// Check if the user wants to quit by entering 'q' + Enter.
 fn check_quit(sender: mpsc::Sender<String>) {
-    // Create a buffer to read user input
-    let mut input_buffer = String::new();
 
     // Read input from the user asynchronously
     let stdin = io::stdin();
