@@ -98,7 +98,37 @@ MQTT data is stored under configured topic as 3 letter codes:
 
 ![image](https://github.com/askrejans/gps-to-mqtt/assets/1042303/37bf6b97-259f-4e90-bbb2-71de8d6aeef1)
 
+## Pre-Built Packages
 
+There are also pre build packages, that combines three individual components: [Speeduino-to-MQTT](https://github.com/askrejans/speeduino-to-mqtt), [GPS-to-MQTT](https://github.com/askrejans/gps-to-mqtt), and [G86 Web Dashboard](https://github.com/askrejans/G86-web-dashboard) in one system with predefined services.
+
+You can quickly get started by using pre-built packages available for both x64 and Raspberry Pi 4 (ARM) architectures:
+
+- **DEB Packages for x64:** [Download here](https://akelaops.com/repo/deb/pool/main/amd64/g86-car-telemetry_1.0.deb)
+- **DEB Packages for Raspberry Pi 4 (ARM):** [Download here](https://akelaops.com/repo/deb/pool/main/aarch64/g86-car-telemetry_1.0.deb)
+- **RPM Packages for x64:** [Download here](https://akelaops.com/repo/rpm/x86_64/g86-car-telemetry-1.0-1.x86_64.rpm)
+- **RPM Packages for Raspberry Pi 4 (ARM):** [Download here](https://akelaops.com/repo/rpm/aarch64/g86-car-telemetry-1.0-1.aarch64.rpm)
+
+### Package Installation Details
+
+- All packages install the three services in the directory `/opt/g86-car-telemetry` (or `/usr/opt/g86-car-telemetry`).
+- Configuration files for GPS and ECU processors can be found under `/etc/g86-car-telemetry` (or `/usr/etc/g86-car-telemetry`).
+- Web project configurations are located in `/var/www/g86-car-telemetry/config` (or `/usr/var/www/g86-car-telemetry/config`).
+- Ensure to add relevant configurations for MQTT server, TTY ports, and any extra settings.
+
+### Installed Services
+
+The packages automatically install and manage the following services:
+
+- `g86-car-telemetry-gps`
+- `g86-car-telemetry-speeduino`
+- `g86-car-telemetry-web`
+
+### Compatibility and Testing
+
+These packages have been tested on both Raspberry Pi 4 (ARM) with DEB packages and x86 systems with RPM packages. However, please note that this project is a work in progress, and more tests are needed, especially with real ECUs. Exercise caution when using, and stay tuned for updates as development continues to enhance and stabilize the functionality.
+
+Feel free to reach out if you have any questions or encounter issues. Happy telemetry monitoring! 📊🛠️
 ## License
 
 This project is licensed under the [MIT License](LICENSE). Feel free to use, modify, and distribute the code as per the license terms.
