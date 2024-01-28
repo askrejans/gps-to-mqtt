@@ -57,9 +57,9 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig, String
             }
         }
 
-        // Try to load from /usr/etc/g86-car-telemetry/speeduino-to-mqtt.toml
+        // Try to load from /usr/etc/g86-car-telemetry/gps-to-mqtt.toml
         if let Err(_) = Config::builder()
-        .add_source(File::with_name("/usr/etc/g86-car-telemetry/speeduino-to-mqtt.toml"))
+        .add_source(File::with_name("/usr/etc/g86-car-telemetry/gps-to-mqtt.toml"))
         .build()
         .and_then(|config| {
             settings = config;
@@ -68,7 +68,7 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig, String
         {
         // If loading from the first path fails, try the second path
         if let Ok(config) = Config::builder()
-            .add_source(File::with_name("/etc/g86-car-telemetry/speeduino-to-mqtt.toml"))
+            .add_source(File::with_name("/etc/g86-car-telemetry/gps-to-mqtt.toml"))
             .build()
         {
             settings = config;
