@@ -20,7 +20,6 @@ lazy_static::lazy_static! {
 ///
 /// * `data` - A slice of bytes representing received data.
 pub fn process_gps_data(data: &[u8], config: &AppConfig, mqtt: mqtt::Client) {
-
     // Convert bytes to a string.
     let data_str = String::from_utf8_lossy(data);
 
@@ -31,37 +30,52 @@ pub fn process_gps_data(data: &[u8], config: &AppConfig, mqtt: mqtt::Client) {
         let cleaned_sentence = sentence[0].trim();
 
         // Dispatch to specialized parsing functions based on sentence type.
-        if cleaned_sentence.starts_with("GPGSV")
-            || cleaned_sentence.starts_with("GLGSV")
-            || cleaned_sentence.starts_with("GAGSV")
-        {
-            // Parse and display GSV sentence.
-            //parse_and_display_gsv(cleaned_sentence);
-        } else if cleaned_sentence.starts_with("GNGGA") {
-            // Parse and display GGA sentence.
-            parse_and_display_gga(cleaned_sentence, mqtt, config);
-        } else if cleaned_sentence.starts_with("GNRMC") {
-            // Parse and display RMC sentence.
-            parse_and_display_rmc(cleaned_sentence, mqtt, config);
-        } else if cleaned_sentence.starts_with("GNVTG") {
-            // Parse and display VTG sentence.
-            parse_and_display_vtg(cleaned_sentence, mqtt, config);
-        } else if cleaned_sentence.starts_with("GNGSA") {
-            // Parse and display GSA sentence.
-            //parse_and_display_gsa(cleaned_sentence);
-        } else if cleaned_sentence.starts_with("GNGLL") {
-            // Parse and display GLL sentence.
-            //parse_and_display_gll(cleaned_sentence);
-        } else if cleaned_sentence.starts_with("GNTXT") {
-            // Parse and display GNTXT sentence.
-            //parse_and_display_gntxt(cleaned_sentence);
-        } else {
-            // Unknown sentence type, just print the raw data.
-            println!("Unknown Sentence Type: {}", cleaned_sentence);
+        match cleaned_sentence {
+            s if s.starts_with("GPGSV") || s.starts_with("GLGSV") || s.starts_with("GAGSV") => {
+                // Parse and display GSV sentence.
+                //parse_and_display_gsv(cleaned_sentence);
+            }
+            s if s.starts_with("GNGGA") => {
+                // Parse and display GGA sentence.
+                parse_and_display_gga(cleaned_sentence, mqtt, config);
+            }
+            s if s.starts_with("GNRMC") => {
+                // Parse and display RMC sentence.
+                parse_and_display_rmc(cleaned_sentence, mqtt, config);
+            }
+            s if s.starts_with("GNVTG") => {
+                // Parse and display VTG sentence.
+                parse_and_display_vtg(cleaned_sentence, mqtt, config);
+            }
+            s if s.starts_with("GNGSA") => {
+                // Parse and display GSA sentence.
+                //parse_and_display_gsa(cleaned_sentence);
+            }
+            s if s.starts_with("GNGLL") => {
+                // Parse and display GLL sentence.
+                //parse_and_display_gll(cleaned_sentence);
+            }
+            s if s.starts_with("GNTXT") => {
+                // Parse and display GNTXT sentence.
+                //parse_and_display_gntxt(cleaned_sentence);
+            }
+            _ => {
+                // Unknown sentence type, just print the raw data.
+                println!("Unknown Sentence Type: {}", cleaned_sentence);
+            }
         }
     }
 }
 
+/// Parses and displays GSV (Satellites in View) sentence data.
+///
+/// # Arguments
+///
+/// * `data` - A string slice that holds the GSV sentence data.
+///
+/// The function splits the GSV sentence into its components and prints the total number of sentences,
+/// the sentence number, and the total number of satellites. It also prints the details of each satellite
+/// including PRN, elevation, azimuth, and SNR.
 fn parse_and_display_gsv(data: &str) {
     let parts: Vec<&str> = data.split(',').collect();
     if parts.len() >= 8 {
@@ -92,6 +106,15 @@ fn parse_and_display_gsv(data: &str) {
     }
 }
 
+/// Parses and displays GGA (Global Positioning System Fix Data) sentence data.
+///
+/// # Arguments
+///
+/// * `data` - A string slice that holds the GGA sentence data.
+/// * `mqtt` - An MQTT client to publish the parsed data.
+/// * `config` - Configuration settings for the application.
+///
+/// The function splits the GGA sentence into its components and publishes the altitude and fix quality to MQTT.
 fn parse_and_display_gga(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     let parts: Vec<&str> = data.split(',').collect();
     if parts.len() >= 7 {
@@ -124,6 +147,15 @@ fn parse_and_display_gga(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     }
 }
 
+/// Parses and displays RMC (Recommended Minimum Specific GPS/Transit Data) sentence data.
+///
+/// # Arguments
+///
+/// * `data` - A string slice that holds the RMC sentence data.
+/// * `mqtt` - An MQTT client to publish the parsed data.
+/// * `config` - Configuration settings for the application.
+///
+/// The function splits the RMC sentence into its components and publishes the time, date, latitude, longitude, and speed to MQTT.
 fn parse_and_display_rmc(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     let parts: Vec<&str> = data.split(',').collect();
     if parts.len() >= 10 {
@@ -183,6 +215,7 @@ fn parse_and_display_rmc(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         ) {
             println!("Error pushing longitude to MQTT: {:?}", e);
         }
+
         // Push speed to MQTT
         if let Err(e) = publish_message(
             &mqtt,
@@ -190,13 +223,20 @@ fn parse_and_display_rmc(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
             &format!("{}", speed).as_str(),
             0,
         ) {
-            println!("Error pushing longitude to MQTT: {:?}", e);
+            println!("Error pushing speed to MQTT: {:?}", e);
         }
     } else {
         println!("Invalid RMC Sentence: {}", data);
     }
 }
 
+/// Parses UTC time in the format HHMMSS.ss and returns the hour, minute, and second.
+///
+/// # Arguments
+///
+/// * `utc_time` - A string slice that holds the UTC time.
+///
+/// The function extracts the hour, minute, and second from the UTC time string.
 fn parse_utc_time(utc_time: &str) -> (u32, u32, u32) {
     // Parse UTC time in the format HHMMSS.ss
     let hour: u32 = FromStr::from_str(&utc_time[0..2]).unwrap_or(0);
@@ -206,6 +246,13 @@ fn parse_utc_time(utc_time: &str) -> (u32, u32, u32) {
     (hour, minute, second)
 }
 
+/// Parses date in the format DDMMYY and returns the day, month, and year.
+///
+/// # Arguments
+///
+/// * `date` - A string slice that holds the date.
+///
+/// The function extracts the day, month, and year from the date string.
 fn parse_date(date: &str) -> (u32, u32, u32) {
     // Parse date in the format DDMMYY
     let day: u32 = FromStr::from_str(&date[0..2]).unwrap_or(0);
@@ -215,6 +262,15 @@ fn parse_date(date: &str) -> (u32, u32, u32) {
     (day, month, year)
 }
 
+/// Parses and displays VTG (Course Over Ground and Ground Speed) sentence data.
+///
+/// # Arguments
+///
+/// * `data` - A string slice that holds the VTG sentence data.
+/// * `mqtt` - An MQTT client to publish the parsed data.
+/// * `config` - Configuration settings for the application.
+///
+/// The function splits the VTG sentence into its components and publishes the course, speed in knots, and speed in kph to MQTT.
 fn parse_and_display_vtg(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     let parts: Vec<&str> = data.split(',').collect();
     if parts.len() >= 9 {
@@ -231,11 +287,38 @@ fn parse_and_display_vtg(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         ) {
             println!("Error pushing course to MQTT: {:?}", e);
         }
+
+        // Push speed in knots to MQTT
+        if let Err(e) = publish_message(
+            &mqtt,
+            &format!("{}SPD_KTS", config.mqtt_base_topic),
+            &format!("{}", speed_knots).as_str(),
+            0,
+        ) {
+            println!("Error pushing speed in knots to MQTT: {:?}", e);
+        }
+
+        // Push speed in kph to MQTT
+        if let Err(e) = publish_message(
+            &mqtt,
+            &format!("{}SPD_KPH", config.mqtt_base_topic),
+            &format!("{}", speed_kph).as_str(),
+            0,
+        ) {
+            println!("Error pushing speed in kph to MQTT: {:?}", e);
+        }
     } else {
         println!("Invalid VTG Sentence: {}", data);
     }
 }
 
+/// Parses and displays GSA (GNSS DOP and Active Satellites) sentence data.
+///
+/// # Arguments
+///
+/// * `data` - A string slice that holds the GSA sentence data.
+///
+/// The function splits the GSA sentence into its components and prints the message ID, fix type, and PRN.
 fn parse_and_display_gsa(data: &str) {
     let parts: Vec<&str> = data.split(',').collect();
     if parts.len() >= 17 {
@@ -257,6 +340,13 @@ fn parse_and_display_gsa(data: &str) {
     }
 }
 
+/// Parses and displays GNTXT (Text Transmission) sentence data.
+///
+/// # Arguments
+///
+/// * `data` - A string slice that holds the GNTXT sentence data.
+///
+/// The function splits the GNTXT sentence into its components and prints the message ID, message number, total messages, and text.
 fn parse_and_display_gntxt(data: &str) {
     let mut parts = data.splitn(4, ',');
     if let (Some(msg_id), Some(msg_num), Some(msg_total), Some(text)) =
@@ -274,6 +364,13 @@ fn parse_and_display_gntxt(data: &str) {
     }
 }
 
+/// Parses and displays GLL (Geographic Position - Latitude/Longitude) sentence data.
+///
+/// # Arguments
+///
+/// * `data` - A string slice that holds the GLL sentence data.
+///
+/// The function splits the GLL sentence into its components and prints the latitude, longitude, UTC time, and data status.
 fn parse_and_display_gll(data: &str) {
     let parts: Vec<&str> = data.split(',').collect();
     if parts.len() >= 7 {
@@ -291,44 +388,159 @@ fn parse_and_display_gll(data: &str) {
     }
 }
 
+/// Parses latitude from NMEA format and converts it to decimal degrees.
+///
+/// # Arguments
+///
+/// * `value` - A string slice that holds the latitude in NMEA format (DDMM.MMMM).
+/// * `direction` - A string slice that holds the direction ('N' or 'S').
+///
+/// The function extracts degrees and minutes from the NMEA format, converts them to decimal degrees,
+/// and adjusts the sign based on the direction.
 fn parse_latitude(value: &str, direction: &str) -> f64 {
     // Ensure the input strings have sufficient length
     if value.len() >= 2 && direction.len() == 1 {
         // Extract degrees and minutes from the raw NMEA format
-        let degrees: f64 = FromStr::from_str(&value[..2]).unwrap_or(0.0);
-        let minutes: f64 = FromStr::from_str(&value[2..]).unwrap_or(0.0);
+        let degrees: f64 = value[..2].parse().unwrap_or(0.0);
+        let minutes: f64 = value[2..].parse().unwrap_or(0.0);
 
         // Convert to decimal degrees and consider direction
         let result = degrees + minutes / 60.0;
         if direction == "S" {
-            return -result;
+            -result
         } else {
-            return result;
+            result
         }
     } else {
         // Handle the case where the input strings are not valid
         println!("Invalid latitude input: {}{}", value, direction);
-        return 0.0;
+        0.0
     }
 }
 
+/// Parses longitude from NMEA format and converts it to decimal degrees.
+///
+/// # Arguments
+///
+/// * `value` - A string slice that holds the longitude in NMEA format (DDDMM.MMMM).
+/// * `direction` - A string slice that holds the direction ('E' or 'W').
+///
+/// The function extracts degrees and minutes from the NMEA format, converts them to decimal degrees,
+/// and adjusts the sign based on the direction.
 fn parse_longitude(value: &str, direction: &str) -> f64 {
     // Ensure the input strings have sufficient length
     if value.len() >= 3 && direction.len() == 1 {
         // Extract degrees and minutes from the raw NMEA format
-        let degrees: f64 = FromStr::from_str(&value[..3]).unwrap_or(0.0);
-        let minutes: f64 = FromStr::from_str(&value[3..]).unwrap_or(0.0);
+        let degrees: f64 = value[..3].parse().unwrap_or(0.0);
+        let minutes: f64 = value[3..].parse().unwrap_or(0.0);
 
         // Convert to decimal degrees and consider direction
         let result = degrees + minutes / 60.0;
         if direction == "W" {
-            return -result;
+            -result
         } else {
-            return result;
+            result
         }
     } else {
         // Handle the case where the input strings are not valid
         println!("Invalid longitude input: {}{}", value, direction);
-        return 0.0;
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use paho_mqtt as mqtt;
+
+    fn get_test_config() -> AppConfig {
+        AppConfig {
+            mqtt_base_topic: "/GOLF86/GPS/".to_string(),
+            baud_rate: 9600,
+            config_path: Some("/path/to/config".to_string()),
+            mqtt_host: "localhost".to_string(),
+            mqtt_port: 1883,
+            set_gps_to_10hz: false,
+            port_name: "/dev/ttyACM0" .to_string()
+        }
+    }
+
+    #[test]
+    fn test_parse_latitude() {
+        assert_eq!(parse_latitude("4916.45", "N"), 49.274166666666666);
+        assert_eq!(parse_latitude("4916.45", "S"), -49.274166666666666);
+        assert_eq!(parse_latitude("0000.00", "N"), 0.0);
+        assert_eq!(parse_latitude("0000.00", "S"), -0.0);
+    }
+
+    #[test]
+    fn test_parse_longitude() {
+        assert_eq!(parse_longitude("12311.12", "E"), 123.18533333333333);
+        assert_eq!(parse_longitude("12311.12", "W"), -123.18533333333333);
+        assert_eq!(parse_longitude("00000.00", "E"), 0.0);
+        assert_eq!(parse_longitude("00000.00", "W"), -0.0);
+    }
+
+    #[test]
+    fn test_parse_utc_time() {
+        assert_eq!(parse_utc_time("123519"), (12, 35, 19));
+        assert_eq!(parse_utc_time("000000"), (0, 0, 0));
+        assert_eq!(parse_utc_time("235959"), (23, 59, 59));
+    }
+
+    #[test]
+    fn test_parse_date() {
+        assert_eq!(parse_date("230394"), (23, 3, 94));
+        assert_eq!(parse_date("010100"), (1, 1, 0));
+        assert_eq!(parse_date("311299"), (31, 12, 99));
+    }
+
+    #[test]
+    fn test_parse_and_display_gsv() {
+        let data = "GPGSV,3,1,11,07,79,045,42,08,62,272,43,09,59,138,42,10,57,359,43*70";
+        parse_and_display_gsv(data);
+    }
+
+    #[test]
+    fn test_parse_and_display_gga() {
+        let config = get_test_config();
+        let mqtt = mqtt::Client::new("tcp://localhost:1883").unwrap();
+        let data = "GNGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
+        parse_and_display_gga(data, mqtt, &config);
+    }
+
+    #[test]
+    fn test_parse_and_display_rmc() {
+        let config = get_test_config();
+        let mqtt = mqtt::Client::new("tcp://localhost:1883").unwrap();
+        let data = "GNRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A";
+        parse_and_display_rmc(data, mqtt, &config);
+    }
+
+    #[test]
+    fn test_parse_and_display_vtg() {
+        let config = get_test_config();
+        let mqtt = mqtt::Client::new("tcp://localhost:1883").unwrap();
+        let data = "GNVTG,054.7,T,034.4,M,005.5,N,010.2,K*48";
+        parse_and_display_vtg(data, mqtt, &config);
+    }
+
+    #[test]
+    fn test_parse_and_display_gsa() {
+        let data = "GNGSA,A,3,04,05,,09,12,,24,,,,,1.8,1.0,1.5*33";
+        parse_and_display_gsa(data);
+    }
+
+    #[test]
+    fn test_parse_and_display_gntxt() {
+        let data = "GNTXT,01,01,02,u-blox ag - www.u-blox.com*4E";
+        parse_and_display_gntxt(data);
+    }
+
+    #[test]
+    fn test_parse_and_display_gll() {
+        let data = "GNGLL,4916.45,N,12311.12,W,225444,A";
+        parse_and_display_gll(data);
     }
 }

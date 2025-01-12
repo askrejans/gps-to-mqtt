@@ -2,8 +2,8 @@ use crate::config::AppConfig;
 use crate::gps_data_parser::process_gps_data;
 use crate::mqtt_handler::setup_mqtt;
 use serialport::SerialPort;
-use std::io::BufRead;
 use std::io;
+use std::io::BufRead;
 use std::sync::mpsc;
 use std::thread;
 
@@ -118,7 +118,6 @@ pub fn gps_resolution_to_10hz(port: &mut Box<dyn SerialPort>) {
 
 /// Check if the user wants to quit by entering 'q' + Enter.
 fn check_quit(sender: mpsc::Sender<String>) {
-
     // Read input from the user asynchronously
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
