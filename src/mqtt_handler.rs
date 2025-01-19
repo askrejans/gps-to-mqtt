@@ -1,5 +1,17 @@
+use log::{debug, error};
 use paho_mqtt as mqtt;
 use std::{process, time::Duration};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum PublishError {
+    #[error("Invalid QoS level. Must be 0, 1 or 2")]
+    InvalidQoS,
+    #[error("MQTT error: {0}")]
+    MqttError(#[from] mqtt::Error),
+    #[error("Empty topic or payload")]
+    EmptyInput,
+}
 
 use crate::config::AppConfig;
 
@@ -60,7 +72,18 @@ pub fn publish_message(
     topic: &str,
     payload: &str,
     qos: i32,
-) -> Result<(), mqtt::Error> {
+) -> Result<(), PublishError> {
+    // Validate inputs
+    if topic.is_empty() || payload.is_empty() {
+        return Err(PublishError::EmptyInput);
+    }
+
+    if qos > 2 {
+        return Err(PublishError::InvalidQoS);
+    }
+
+    debug!("Publishing message to topic: {}", topic);
+
     let msg = mqtt::MessageBuilder::new()
         .topic(topic)
         .payload(payload)
@@ -68,5 +91,5 @@ pub fn publish_message(
         .retained(true)
         .finalize();
 
-    cli.publish(msg)
+    cli.publish(msg).map_err(PublishError::MqttError)
 }

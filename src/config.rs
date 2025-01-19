@@ -20,9 +20,6 @@ pub struct AppConfig {
 
     // The base topic of MQTT where data is pushed
     pub mqtt_base_topic: String,
-
-    // Optional: Path to the configuration file
-    pub config_path: Option<String>,
 }
 
 /// Load application configuration from a TOML file.
@@ -35,13 +32,11 @@ pub struct AppConfig {
 /// # Returns
 /// Returns a `Result` containing either the `AppConfig` struct with the loaded configuration or an error message.
 pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig, String> {
-    let mut settings = Config::default();
-
-    if let Some(path) = config_path {
-        settings = load_from_path(path)?;
+    let settings = if let Some(path) = config_path {
+        load_from_path(path)?
     } else {
-        settings = load_default_paths()?;
-    }
+        load_default_paths()?
+    };
 
     Ok(AppConfig {
         port_name: settings
@@ -56,7 +51,6 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig, String
         mqtt_base_topic: settings
             .get_string("mqtt_base_topic")
             .unwrap_or_else(|_| "default_topic".to_string()),
-        config_path: config_path.map(|p| p.to_string()),
     })
 }
 
@@ -96,8 +90,6 @@ fn load_from_path(path: &str) -> Result<Config, String> {
 /// * `Ok(Config)` - If a configuration file is successfully loaded from any of the default paths.
 /// * `Err(String)` - If there is an error loading the configuration from all default paths.
 fn load_default_paths() -> Result<Config, String> {
-    let mut settings = Config::default();
-
     if let Ok(exe_dir) = std::env::current_exe() {
         let exe_dir = exe_dir.parent().unwrap_or_else(|| Path::new("."));
         let default_path = exe_dir.join("settings.toml");
@@ -106,27 +98,25 @@ fn load_default_paths() -> Result<Config, String> {
             .add_source(File::with_name(default_path.to_str().unwrap()))
             .build()
         {
-            settings = config;
+            return Ok(config);
         }
     }
 
-    if let Err(_) = Config::builder()
+    if let Ok(config) = Config::builder()
         .add_source(File::with_name(
             "/usr/etc/g86-car-telemetry/gps-to-mqtt.toml",
         ))
         .build()
-        .and_then(|config| {
-            settings = config;
-            Ok(())
-        })
     {
-        if let Ok(config) = Config::builder()
-            .add_source(File::with_name("/etc/g86-car-telemetry/gps-to-mqtt.toml"))
-            .build()
-        {
-            settings = config;
-        }
+        return Ok(config);
     }
 
-    Ok(settings)
+    if let Ok(config) = Config::builder()
+        .add_source(File::with_name("/etc/g86-car-telemetry/gps-to-mqtt.toml"))
+        .build()
+    {
+        return Ok(config);
+    }
+
+    Ok(Config::default())
 }

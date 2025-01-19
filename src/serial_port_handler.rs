@@ -1,11 +1,23 @@
 use crate::config::AppConfig;
 use crate::gps_data_parser::process_gps_data;
 use crate::mqtt_handler::setup_mqtt;
+use log::{error, info};
 use serialport::SerialPort;
-use std::io;
-use std::io::BufRead;
+use std::io::{self, BufRead};
 use std::sync::mpsc;
 use std::thread;
+
+/// UBX-CFG-RATE command bytes for 10Hz sampling
+const UBX_CFG_RATE_10HZ: [u8; 14] = [
+    0xB5, 0x62, // Header
+    0x06, 0x08, // Class/ID
+    0x06, 0x00, // Length
+    0x64, 0x00, // Measurement rate (100ms)
+    0x01, 0x00, // Navigation rate
+    0x01, 0x00, // Time reference
+    0x7A, 0x12, // Checksum
+];
+const QUIT_COMMAND: &str = "q";
 
 /// Set up and open a serial port based on the provided configuration.
 ///
@@ -24,23 +36,21 @@ use std::thread;
 ///
 /// Returns a boxed trait object representing the opened serial port.
 pub fn setup_serial_port(config: &AppConfig) -> Box<dyn serialport::SerialPort> {
-    // Opening and configuring the specified serial port.
     println!("Opening port: {}", config.port_name);
 
-    let mut port = match serialport::new(&config.port_name, config.baud_rate as u32)
+    let mut port = serialport::new(&config.port_name, config.baud_rate as u32)
         .timeout(std::time::Duration::from_millis(1000))
         .open()
-    {
-        Ok(p) => p,
-        Err(err) => {
+        .unwrap_or_else(|err| {
             eprintln!("Failed to open port: {}", err);
             std::process::exit(1);
-        }
-    };
+        });
 
     if config.set_gps_to_10hz {
         println!("Setting GPS sample rate to 10Hz");
-        gps_resolution_to_10hz(&mut port);
+        if let Err(e) = gps_resolution_to_10hz(&mut port) {
+            eprintln!("Failed to set GPS sample rate: {:?}", e);
+        }
     }
 
     port
@@ -55,82 +65,105 @@ pub fn setup_serial_port(config: &AppConfig) -> Box<dyn serialport::SerialPort> 
 ///
 /// * `port` - A mutable reference to a boxed trait object representing a serial port.
 pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
-    // Buffer to store received serial data.
-    let mut serial_buf: Vec<u8> = vec![0; 1024];
+    let mut serial_buf = vec![0; 1024];
     let mqtt = setup_mqtt(&config);
 
-    // Create a channel for communication between threads
     let (sender, receiver) = mpsc::channel();
-    let sender_clone = sender.clone();
 
-    // Spawn a separate thread for user input
-    thread::spawn(move || {
-        check_quit(sender_clone);
+    thread::spawn({
+        let sender = sender.clone();
+        move || check_quit(sender)
     });
 
-    // Continuously read data from the serial port.
     loop {
-        // Check if the user wants to quit.
         if let Ok(message) = receiver.try_recv() {
             if message == "q" {
                 println!("Received quit command. Exiting the program.");
-                return;
+                break;
             }
         }
 
         match port.read(serial_buf.as_mut_slice()) {
-            Ok(t) => {
-                if t > 0 {
-                    // Process and print the received data.
-                    let data = &serial_buf[0..t];
-                    process_gps_data(data, config, mqtt.clone());
+            Ok(t) if t > 0 => {
+                let data = &serial_buf[..t];
+                if let Err(e) = process_gps_data(data, config, mqtt.clone()) {
+                    eprintln!("Error processing GPS data: {:?}", e);
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => (),
-            Err(e) => eprintln!("{:?}", e),
+            Err(e) => eprintln!("Serial port read error: {:?}", e),
+            _ => (),
         }
     }
 }
 
-/// Increases GPS resolution to 10Hz (ublox GPS device)
+/// Configures GPS device to output at 10Hz sampling rate
 ///
-/// UBX -> CFG -> RATE command to 10Hz
+/// Sends UBX-CFG-RATE command to a ublox GPS device to set measurement
+/// rate to 100ms (10Hz). Uses UBX protocol format:
+/// - Header: 0xB5 0x62
+/// - Class/ID: 0x06 0x08 (CFG-RATE)
+/// - Payload: rate(U2), navRate(U2), timeRef(U2)
 ///
 /// # Arguments
 ///
-/// * `port` - A mutable reference to a boxed trait object representing a serial port.
-pub fn gps_resolution_to_10hz(port: &mut Box<dyn SerialPort>) {
-    // Bytes to send to the device.
-    let bytes_to_send: Vec<u8> = vec![
-        0xB5, 0x62, 0x06, 0x08, 0x06, 0x00, 0x64, 0x00, 0x01, 0x00, 0x01, 0x00, 0x7A, 0x12,
-    ];
+/// * `port` - Mutable reference to serial port implementing SerialPort trait
+///
+/// # Returns
+///
+/// * `io::Result<()>` - Success or IO error
+///
+pub fn gps_resolution_to_10hz(port: &mut Box<dyn SerialPort>) -> io::Result<()> {
+    port.write_all(&UBX_CFG_RATE_10HZ).map_err(|e| {
+        error!("Failed to set GPS sample rate: {}", e);
+        e
+    })?;
 
-    // Send the bytes to the device.
-    match port.write_all(&bytes_to_send) {
-        Ok(_) => {
-            println!("Sample rate set successfully!");
-        }
-        Err(e) => {
-            eprintln!("Error sending bytes to set sample rate: {:?}", e);
-        }
-    }
+    info!("GPS sample rate configured to 10Hz");
+    Ok(())
 }
 
-/// Check if the user wants to quit by entering 'q' + Enter.
+/// Monitors standard input for quit command ('q' + Enter)
+///
+/// This function runs in a separate thread and monitors stdin for user input.
+/// When the quit command is detected, it sends a message through the provided channel.
+///
+/// # Arguments
+///
+/// * `sender` - Channel sender used to communicate quit command to main thread
+///
+/// # Example
+///
+/// ```
+/// use std::sync::mpsc;
+/// let (tx, rx) = mpsc::channel();
+/// std::thread::spawn(move || check_quit(tx));
+/// ```
+///
+/// # Notes
+///
+/// - Blocks until user enters input
+/// - Exits when 'q' is entered or on stdin error
 fn check_quit(sender: mpsc::Sender<String>) {
-    // Read input from the user asynchronously
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
 
-    // Check if the input is 'q'
-    if let Some(Ok(line)) = lines.next() {
-        if line.trim() == "q" {
-            // Send quit command to the main thread
-            sender.send("q".to_string()).unwrap();
-            return;
+    loop {
+        match lines.next() {
+            Some(Ok(line)) => {
+                if line.trim() == QUIT_COMMAND {
+                    if let Err(e) = sender.send(QUIT_COMMAND.to_string()) {
+                        error!("Failed to send quit command: {}", e);
+                        break;
+                    }
+                    break;
+                }
+            }
+            Some(Err(e)) => {
+                error!("Error reading from stdin: {}", e);
+                break;
+            }
+            None => break,
         }
     }
-
-    // If the input is not 'q', continue checking
-    check_quit(sender);
 }
