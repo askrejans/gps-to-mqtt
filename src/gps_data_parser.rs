@@ -138,51 +138,39 @@ fn process_complete_message(
     
     match NmeaSentence::from_str(sentence) {
         NmeaSentence::GSV => {
-            println!("→ Parsing GSV (Satellites in View)");
             parse_and_display_gsv(sentence, mqtt.clone(), config)
         }
         NmeaSentence::GGA => {
-            println!("→ Parsing GGA (Fix Information)"); 
             parse_and_display_gga(sentence, mqtt.clone(), config)
         }
         NmeaSentence::RMC => {
-            println!("→ Parsing RMC (Recommended Minimum Data)");
             parse_and_display_rmc(sentence, mqtt.clone(), config)
         }
         NmeaSentence::VTG => {
-            println!("→ Parsing VTG (Vector Track & Speed)");
             parse_and_display_vtg(sentence, mqtt.clone(), config)
         }
         NmeaSentence::GSA => {
-            println!("→ Parsing GSA (Overall Satellite Data)");
             parse_and_display_gsa(sentence, mqtt.clone(), config)
         }
         NmeaSentence::GLL => {
-            println!("→ Parsing GLL (Geographic Position)");
             parse_and_display_gll(sentence, mqtt.clone(), config)
         }
         NmeaSentence::TXT => {
-            println!("→ Parsing TXT (Text Transmission)");
             parse_and_display_gntxt(sentence, mqtt.clone(), config)
         }
         NmeaSentence::GRS => {
-            println!("→ Parsing GRS (GNSS Range Residuals)");
             parse_and_display_grs(sentence, mqtt.clone(), config)
         }
         NmeaSentence::GST => {
-            println!("→ Parsing GST (GNSS Pseudorange Error Statistics)");
             parse_and_display_gst(sentence, mqtt.clone(), config)
         }
         NmeaSentence::GNS => {
-            println!("→ Parsing GNS (GNSS Fix Data)");
             parse_and_display_gns(sentence, mqtt.clone(), config)
         }
         NmeaSentence::VLW => {
-            println!("→ Parsing VLW (Dual Ground/Water Distance)");
             parse_and_display_vlw(sentence, mqtt.clone(), config)
         }
         NmeaSentence::PBX => {
-            println!("→ Parsing PUBX (u-blox Proprietary)");
             parse_and_display_pubx(sentence, mqtt.clone(), config)
         }
         NmeaSentence::Unknown => {
@@ -212,6 +200,7 @@ fn parse_and_display_gsv(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         "GL" => SatelliteType::GLONASS,
         "GA" => SatelliteType::Galileo,
         "BD" => SatelliteType::BeiDou,
+        "GB" => SatelliteType::BeiDou,
         "GQ" => SatelliteType::Unknown,
         _ => {
             println!("Unknown satellite type prefix: {}", msg_type);
