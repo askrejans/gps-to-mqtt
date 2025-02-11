@@ -1,7 +1,15 @@
 use log::{debug, error};
 use paho_mqtt as mqtt;
 use std::{process, time::Duration};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use thiserror::Error;
+
+
+lazy_static::lazy_static! {
+    static ref LAST_VALUES: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
+}
+
 
 #[derive(Error, Debug)]
 pub enum PublishError {
@@ -11,6 +19,8 @@ pub enum PublishError {
     MqttError(#[from] mqtt::Error),
     #[error("Empty topic or payload")]
     EmptyInput,
+    #[error("Mutex lock error")]
+    LockError,
 }
 
 use crate::config::AppConfig;
@@ -55,6 +65,62 @@ pub fn setup_mqtt(config: &AppConfig) -> mqtt::Client {
     cli
 }
 
+/// Publish an MQTT message only if the value has changed since last publication
+///
+/// # Arguments
+///
+/// * `cli` - A reference to the MQTT client
+/// * `topic` - The MQTT topic to publish to
+/// * `payload` - The message payload
+/// * `qos` - Quality of Service level (0, 1, or 2)
+///
+/// # Returns
+///
+/// Returns `Result<(), PublishError>` indicating success or if an error occurred
+pub fn publish_if_changed(
+    cli: &mqtt::Client,
+    topic: &str,
+    payload: &str,
+    qos: i32,
+) -> Result<(), PublishError> {
+    // Validate inputs
+    if topic.is_empty() || payload.is_empty() {
+        return Err(PublishError::EmptyInput);
+    }
+
+    if qos > 2 {
+        return Err(PublishError::InvalidQoS);
+    }
+
+    // Get lock on last values
+    let mut last_values = LAST_VALUES
+        .lock()
+        .map_err(|_| PublishError::LockError)?;
+
+    // Check if value has changed
+    if last_values.get(topic).map_or(true, |last_value| last_value != payload) {
+        debug!("Publishing changed value to topic: {}", topic);
+        
+        // Create and publish message
+        let msg = mqtt::MessageBuilder::new()
+            .topic(topic)
+            .payload(payload)
+            .qos(qos)
+            .retained(true)
+            .finalize();
+
+        cli.publish(msg).map_err(PublishError::MqttError)?;
+
+        // Update stored value after successful publish
+        last_values.insert(topic.to_string(), payload.to_string());
+        
+        Ok(())
+    } else {
+        debug!("Skipping publish - value unchanged for topic: {}", topic);
+        Ok(())
+    }
+}
+
 /// Publish an MQTT message to the specified topic with the given payload and QoS.
 ///
 /// # Arguments
@@ -73,23 +139,6 @@ pub fn publish_message(
     payload: &str,
     qos: i32,
 ) -> Result<(), PublishError> {
-    // Validate inputs
-    if topic.is_empty() || payload.is_empty() {
-        return Err(PublishError::EmptyInput);
-    }
-
-    if qos > 2 {
-        return Err(PublishError::InvalidQoS);
-    }
-
-    debug!("Publishing message to topic: {}", topic);
-
-    let msg = mqtt::MessageBuilder::new()
-        .topic(topic)
-        .payload(payload)
-        .qos(qos)
-        .retained(true)
-        .finalize();
-
-    cli.publish(msg).map_err(PublishError::MqttError)
+    // For backwards compatibility, this now calls publish_if_changed
+    publish_if_changed(cli, topic, payload, qos)
 }

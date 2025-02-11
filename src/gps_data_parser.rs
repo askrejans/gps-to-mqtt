@@ -210,7 +210,6 @@ fn parse_and_display_gsv(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     let parts: Vec<&str> = data.split(',').collect();
     if parts.len() >= 8 {
         let num_satellites = parts[3].parse::<usize>().unwrap_or(0);
-        println!("Total Satellites: {}", num_satellites);
 
         // Publish total satellites count
         if let Err(e) = publish_message(
@@ -247,8 +246,6 @@ fn parse_and_display_gsv(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
                 println!("Error pushing satellite info to MQTT: {:?}", e);
             }
         }
-    } else {
-        println!("Invalid GSV Sentence: {}", data);
     }
 }
 
