@@ -134,7 +134,6 @@ fn process_complete_message(
     };
 
     // Parse sentence type and dispatch to appropriate handler
-    println!("Processing NMEA message: {}", sentence);
     
     match NmeaSentence::from_str(sentence) {
         NmeaSentence::GSV => {
@@ -232,16 +231,6 @@ fn parse_and_display_gsv(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
             let sat_snr = parts[sat_index + 3].parse::<usize>().unwrap_or(0);
             let in_view = sat_snr > 0;
 
-            println!(
-                "Satellite PRN: {}, Type: {}, Elevation: {}, Azimuth: {}, SNR: {}, In View: {}",
-                sat_prn,
-                sat_type.as_str(),
-                sat_elevation,
-                sat_azimuth,
-                sat_snr,
-                in_view
-            );
-
             // Keep original MQTT topic structure
             let sat_topic = format!("{}SAT/VEHICLES/{}", config.mqtt_base_topic, sat_prn);
             let sat_info = format!(
@@ -280,10 +269,6 @@ fn parse_and_display_gga(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let longitude = parts[4].parse::<f64>().unwrap_or(0.0);
         let altitude = parts[9].parse::<f64>().unwrap_or(0.0);
         let fix_quality = parts[6].parse::<usize>().unwrap_or(0);
-
-        println!("Latitude: {}", latitude);
-        println!("Longitude: {}", longitude);
-        println!("Altitude: {}", altitude);
 
         // Push altitude to MQTT
         if let Err(e) = publish_message(
@@ -451,11 +436,6 @@ fn parse_and_display_gsa(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         };
         let prn = parts[3].parse::<usize>().unwrap_or(0);
 
-        println!(
-            "GSA Sentence - Message ID: {}, Fix Type: {}, PRN: {}",
-            message_id, fix_type, prn
-        );
-
         // Publish fix type to MQTT
         let sat_topic = format!("{}SAT/VEHICLES/{}/FIX_TYPE", config.mqtt_base_topic, prn);
         if let Err(e) = publish_message(&mqtt, &sat_topic, fix_type, 0) {
@@ -489,8 +469,6 @@ fn parse_and_display_gntxt(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         if message.contains("txbuf alloc") {
             return;
         }
-
-        println!("GNTXT Text: {}", message);
 
         let topics = [
             ("ANTSTATUS=", "SAT/GLOBAL/ANTSTATUS"),
@@ -542,11 +520,6 @@ fn parse_and_display_gll(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     let (hour, minute, second) = parse_utc_time(utc_time);
     let current_time = format!("{:02}:{:02}:{:02}", hour, minute, second);
 
-    println!(
-        "GLL Latitude: {}, GLL Longitude: {}, GLL UTC Time: {}",
-        latitude, longitude, current_time
-    );
-
     // Helper function to publish messages to MQTT
     fn publish_gll_message(
         mqtt: &mqtt::Client,
@@ -580,7 +553,6 @@ fn parse_and_display_grs(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
             .map(|s| s.parse::<f64>().unwrap_or(0.0))
             .collect();
 
-        println!("GRS Data - Time: {}, Mode: {}", time, mode);
 
         // Publish mode
         if let Err(e) = publish_message(
@@ -619,8 +591,6 @@ fn parse_and_display_gst(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let std_lon = parts[7].parse::<f64>().unwrap_or(0.0);
         let std_alt = parts[8].parse::<f64>().unwrap_or(0.0);
 
-        println!("GST Data - Time: {}, RMS: {}", time, rms);
-
         let metrics = [
             ("RMS", rms),
             ("STD_MAJOR", std_major),
@@ -657,7 +627,6 @@ fn parse_and_display_gns(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let altitude = parts[9].parse::<f64>().unwrap_or(0.0);
         let separation = parts[10].parse::<f64>().unwrap_or(0.0);
 
-        println!("GNS Data - Time: {}, Satellites: {}", time, satellites);
 
         let metrics = [
             ("LAT", latitude),
@@ -706,8 +675,6 @@ fn parse_and_display_vlw(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let total_water = parts[1].parse::<f64>().unwrap_or(0.0);
         let total_ground = parts[5].parse::<f64>().unwrap_or(0.0);
 
-        println!("VLW Data - Water: {} N, Ground: {} N", total_water, total_ground);
-
         let metrics = [
             ("WATER", total_water),
             ("GROUND", total_ground),
@@ -753,8 +720,6 @@ fn parse_pubx_position(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let h_acc = parts[9].parse::<f64>().unwrap_or(0.0);
         let v_acc = parts[10].parse::<f64>().unwrap_or(0.0);
 
-        println!("PUBX Position - Time: {}, Nav Status: {}", time, nav_stat);
-
         let metrics = [
             ("LAT", latitude),
             ("LON", longitude),
@@ -794,7 +759,6 @@ fn parse_pubx_svstatus(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     }
 
     let num_svs = parts[2].parse::<i32>().unwrap_or(0);
-    println!("PUBX Satellite Status - Satellites: {}", num_svs);
 
     if let Err(e) = publish_message(
         &mqtt,
