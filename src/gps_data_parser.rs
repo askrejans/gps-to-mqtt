@@ -77,23 +77,58 @@ lazy_static::lazy_static! {
 ///
 /// * `data` - A slice of bytes representing received data.
 pub fn process_gps_data(
-    data: &[u8],
-    config: &AppConfig,
-    mqtt: mqtt::Client,
+data: &[u8],
+config: &AppConfig,
+mqtt: mqtt::Client,
 ) -> Result<(), Box<dyn Error>> {
-    let data_str = String::from_utf8_lossy(data);
+let data_str = String::from_utf8_lossy(data);
 
+// Buffer to reconstruct split messages
+let mut message_buffer = String::new();
+
+for line in data_str.lines() {
+    let line = line.trim();
+    
+    // If line starts with $, it's a new message
+    if line.starts_with('$') {
+        // Process any complete message in buffer
+        if !message_buffer.is_empty() {
+            process_complete_message(&message_buffer, config, mqtt.clone())?;
+        }
+        message_buffer.clear();
+        message_buffer.push_str(line);
+    } else {
+        // Append continuation line
+        message_buffer.push_str(line);
+    }
+    
+    // Check if we have a complete message (ends with checksum)
+    if line.contains('*') {
+        process_complete_message(&message_buffer, config, mqtt.clone())?;
+        message_buffer.clear();
+    }
+}
+
+Ok(())
+}
+
+
+fn process_complete_message(
+    message: &str, 
+    config: &AppConfig,
+    mqtt: mqtt::Client
+) -> Result<(), Box<dyn Error>> {
     // Early return if invalid format
-    if !data_str.starts_with('$') || !data_str.contains('*') {
-        println!("Ignored invalid message format: {}", data_str.trim());
+    if !message.starts_with('$') || !message.contains('*') {
+        println!("Ignored invalid message format: {}", message);
         return Ok(());
     }
 
     // Extract sentence using more efficient string operations
-    let sentence = match data_str.split('*').next() {
+    let sentence = match message.split('*').next() {
         Some(s) => &s[1..], // Skip the '$' character
         None => {
-            println!("Failed to parse message: {}", data_str.trim());
+            println!("Failed to parse message: {}", message);
             return Ok(());
         }
     };
@@ -107,7 +142,7 @@ pub fn process_gps_data(
             parse_and_display_gsv(sentence, mqtt.clone(), config)
         }
         NmeaSentence::GGA => {
-            println!("→ Parsing GGA (Fix Information)");
+            println!("→ Parsing GGA (Fix Information)"); 
             parse_and_display_gga(sentence, mqtt.clone(), config)
         }
         NmeaSentence::RMC => {
