@@ -13,6 +13,11 @@ pub enum NmeaSentence {
     GSA, // Overall satellite data
     GLL, // Geographic position
     TXT, // Text transmission
+    GRS, // GNSS Range Residuals
+    GST, // GNSS Pseudorange Error Statistics
+    GNS, // GNSS Fix Data
+    VLW, // Dual Ground/Water Distance
+    PBX, // PUBX proprietary messages
     Unknown,
 }
 
@@ -26,6 +31,11 @@ impl NmeaSentence {
             s if s.contains("GSA") => NmeaSentence::GSA,
             s if s.contains("GLL") => NmeaSentence::GLL,
             s if s.contains("TXT") => NmeaSentence::TXT,
+            s if s.contains("GRS") => NmeaSentence::GRS,
+            s if s.contains("GST") => NmeaSentence::GST,
+            s if s.contains("GNS") => NmeaSentence::GNS,
+            s if s.contains("VLW") => NmeaSentence::VLW,
+            s if s.contains("PUBX") => NmeaSentence::PBX,
             _ => NmeaSentence::Unknown,
         }
     }
@@ -93,6 +103,11 @@ pub fn process_gps_data(
         NmeaSentence::GSA => parse_and_display_gsa(sentence, mqtt.clone(), config),
         NmeaSentence::GLL => parse_and_display_gll(sentence, mqtt.clone(), config),
         NmeaSentence::TXT => parse_and_display_gntxt(sentence, mqtt.clone(), config),
+        NmeaSentence::GRS => parse_and_display_grs(sentence, mqtt.clone(), config),
+        NmeaSentence::GST => parse_and_display_gst(sentence, mqtt.clone(), config),
+        NmeaSentence::GNS => parse_and_display_gns(sentence, mqtt.clone(), config),
+        NmeaSentence::VLW => parse_and_display_vlw(sentence, mqtt.clone(), config),
+        NmeaSentence::PBX => parse_and_display_pubx(sentence, mqtt.clone(), config),
         NmeaSentence::Unknown => {
             println!("Unknown Sentence Type: {}", sentence);
         }
@@ -120,6 +135,7 @@ fn parse_and_display_gsv(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         "GL" => SatelliteType::GLONASS,
         "GA" => SatelliteType::Galileo,
         "BD" => SatelliteType::BeiDou,
+        "GQ" => SatelliteType::Unknown,
         _ => {
             println!("Unknown satellite type prefix: {}", msg_type);
             SatelliteType::Unknown
@@ -486,6 +502,271 @@ fn parse_and_display_gll(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     publish_gll_message(&mqtt, "GLL_TME", &current_time, config);
     publish_gll_message(&mqtt, "GLL_LAT", &latitude.to_string(), config);
     publish_gll_message(&mqtt, "GLL_LNG", &longitude.to_string(), config);
+}
+
+/// Parses GRS (GNSS Range Residuals) sentence
+fn parse_and_display_grs(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
+    let parts: Vec<&str> = data.split(',').collect();
+    if parts.len() >= 15 {
+        let time = parts[1];
+        let mode = parts[2];
+        let residuals: Vec<f64> = parts[3..15].iter()
+            .map(|s| s.parse::<f64>().unwrap_or(0.0))
+            .collect();
+
+        println!("GRS Data - Time: {}, Mode: {}", time, mode);
+
+        // Publish mode
+        if let Err(e) = publish_message(
+            &mqtt,
+            &format!("{}GRS/MODE", config.mqtt_base_topic),
+            mode,
+            0,
+        ) {
+            println!("Error publishing GRS mode: {:?}", e);
+        }
+
+        // Publish residuals
+        for (i, residual) in residuals.iter().enumerate() {
+            if let Err(e) = publish_message(
+                &mqtt,
+                &format!("{}GRS/RESIDUAL/{}", config.mqtt_base_topic, i+1),
+                &residual.to_string(),
+                0,
+            ) {
+                println!("Error publishing residual {}: {:?}", i+1, e);
+            }
+        }
+    }
+}
+
+/// Parses GST (GNSS Pseudorange Error Statistics) sentence
+fn parse_and_display_gst(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
+    let parts: Vec<&str> = data.split(',').collect();
+    if parts.len() >= 8 {
+        let time = parts[1];
+        let rms = parts[2].parse::<f64>().unwrap_or(0.0);
+        let std_major = parts[3].parse::<f64>().unwrap_or(0.0);
+        let std_minor = parts[4].parse::<f64>().unwrap_or(0.0);
+        let orientation = parts[5].parse::<f64>().unwrap_or(0.0);
+        let std_lat = parts[6].parse::<f64>().unwrap_or(0.0);
+        let std_lon = parts[7].parse::<f64>().unwrap_or(0.0);
+        let std_alt = parts[8].parse::<f64>().unwrap_or(0.0);
+
+        println!("GST Data - Time: {}, RMS: {}", time, rms);
+
+        let metrics = [
+            ("RMS", rms),
+            ("STD_MAJOR", std_major),
+            ("STD_MINOR", std_minor),
+            ("ORIENTATION", orientation),
+            ("STD_LAT", std_lat),
+            ("STD_LON", std_lon),
+            ("STD_ALT", std_alt),
+        ];
+
+        for (name, value) in metrics.iter() {
+            if let Err(e) = publish_message(
+                &mqtt,
+                &format!("{}GST/{}", config.mqtt_base_topic, name),
+                &value.to_string(),
+                0,
+            ) {
+                println!("Error publishing GST {}: {:?}", name, e);
+            }
+        }
+    }
+}
+
+/// Parses GNS (GNSS Fix Data) sentence
+fn parse_and_display_gns(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
+    let parts: Vec<&str> = data.split(',').collect();
+    if parts.len() >= 13 {
+        let time = parts[1];
+        let latitude = parse_latitude(parts[2], parts[3]);
+        let longitude = parse_longitude(parts[4], parts[5]);
+        let mode = parts[6];
+        let satellites = parts[7].parse::<i32>().unwrap_or(0);
+        let hdop = parts[8].parse::<f64>().unwrap_or(0.0);
+        let altitude = parts[9].parse::<f64>().unwrap_or(0.0);
+        let separation = parts[10].parse::<f64>().unwrap_or(0.0);
+
+        println!("GNS Data - Time: {}, Satellites: {}", time, satellites);
+
+        let metrics = [
+            ("LAT", latitude),
+            ("LON", longitude),
+            ("HDOP", hdop),
+            ("ALT", altitude),
+            ("SEP", separation),
+        ];
+
+        for (name, value) in metrics.iter() {
+            if let Err(e) = publish_message(
+                &mqtt,
+                &format!("{}GNS/{}", config.mqtt_base_topic, name),
+                &value.to_string(),
+                0,
+            ) {
+                println!("Error publishing GNS {}: {:?}", name, e);
+            }
+        }
+
+        // Publish mode and satellites separately
+        if let Err(e) = publish_message(
+            &mqtt,
+            &format!("{}GNS/MODE", config.mqtt_base_topic),
+            mode,
+            0,
+        ) {
+            println!("Error publishing GNS mode: {:?}", e);
+        }
+
+        if let Err(e) = publish_message(
+            &mqtt,
+            &format!("{}GNS/SAT", config.mqtt_base_topic),
+            &satellites.to_string(),
+            0,
+        ) {
+            println!("Error publishing GNS satellites: {:?}", e);
+        }
+    }
+}
+
+/// Parses VLW (Dual Ground/Water Distance) sentence
+fn parse_and_display_vlw(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
+    let parts: Vec<&str> = data.split(',').collect();
+    if parts.len() >= 8 {
+        let total_water = parts[1].parse::<f64>().unwrap_or(0.0);
+        let total_ground = parts[5].parse::<f64>().unwrap_or(0.0);
+
+        println!("VLW Data - Water: {} N, Ground: {} N", total_water, total_ground);
+
+        let metrics = [
+            ("WATER", total_water),
+            ("GROUND", total_ground),
+        ];
+
+        for (name, value) in metrics.iter() {
+            if let Err(e) = publish_message(
+                &mqtt,
+                &format!("{}VLW/{}", config.mqtt_base_topic, name),
+                &value.to_string(),
+                0,
+            ) {
+                println!("Error publishing VLW {}: {:?}", name, e);
+            }
+        }
+    }
+}
+
+/// Parses PUBX (u-blox proprietary) messages
+fn parse_and_display_pubx(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
+    let parts: Vec<&str> = data.split(',').collect();
+    if parts.len() < 2 {
+        return;
+    }
+
+    let msg_id = parts[1];
+    match msg_id {
+        "00" => parse_pubx_position(data, mqtt, config),
+        "03" => parse_pubx_svstatus(data, mqtt, config),
+        _ => println!("Unknown PUBX message type: {}", msg_id),
+    }
+}
+
+/// Parses PUBX,00 (Position) message
+fn parse_pubx_position(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
+    let parts: Vec<&str> = data.split(',').collect();
+    if parts.len() >= 21 {
+        let time = parts[2];
+        let latitude = parse_latitude(parts[3], parts[4]);
+        let longitude = parse_longitude(parts[5], parts[6]);
+        let altitude = parts[7].parse::<f64>().unwrap_or(0.0);
+        let nav_stat = parts[8];
+        let h_acc = parts[9].parse::<f64>().unwrap_or(0.0);
+        let v_acc = parts[10].parse::<f64>().unwrap_or(0.0);
+
+        println!("PUBX Position - Time: {}, Nav Status: {}", time, nav_stat);
+
+        let metrics = [
+            ("LAT", latitude),
+            ("LON", longitude),
+            ("ALT", altitude),
+            ("HACC", h_acc),
+            ("VACC", v_acc),
+        ];
+
+        for (name, value) in metrics.iter() {
+            if let Err(e) = publish_message(
+                &mqtt,
+                &format!("{}PUBX/POS/{}", config.mqtt_base_topic, name),
+                &value.to_string(),
+                0,
+            ) {
+                println!("Error publishing PUBX position {}: {:?}", name, e);
+            }
+        }
+
+        // Publish nav status separately
+        if let Err(e) = publish_message(
+            &mqtt,
+            &format!("{}PUBX/POS/NAV_STAT", config.mqtt_base_topic),
+            nav_stat,
+            0,
+        ) {
+            println!("Error publishing PUBX nav status: {:?}", e);
+        }
+    }
+}
+
+/// Parses PUBX,03 (Satellite Status) message
+fn parse_pubx_svstatus(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
+    let parts: Vec<&str> = data.split(',').collect();
+    if parts.len() < 4 {
+        return;
+    }
+
+    let num_svs = parts[2].parse::<i32>().unwrap_or(0);
+    println!("PUBX Satellite Status - Satellites: {}", num_svs);
+
+    if let Err(e) = publish_message(
+        &mqtt,
+        &format!("{}PUBX/SAT/COUNT", config.mqtt_base_topic),
+        &num_svs.to_string(),
+        0,
+    ) {
+        println!("Error publishing PUBX satellite count: {:?}", e);
+    }
+
+    // Process individual satellite data
+    let mut sv_index = 3;
+    while sv_index + 5 < parts.len() {
+        if let (Ok(prn), Ok(elevation), Ok(azimuth), Ok(snr)) = (
+            parts[sv_index].parse::<i32>(),
+            parts[sv_index + 2].parse::<i32>(),
+            parts[sv_index + 3].parse::<i32>(),
+            parts[sv_index + 4].parse::<i32>(),
+        ) {
+            let sv_metrics = [
+                ("EL", elevation),
+                ("AZ", azimuth),
+                ("SNR", snr),
+            ];
+
+            for (name, value) in sv_metrics.iter() {
+                if let Err(e) = publish_message(
+                    &mqtt,
+                    &format!("{}PUBX/SAT/{}/{}", config.mqtt_base_topic, prn, name),
+                    &value.to_string(),
+                    0,
+                ) {
+                    println!("Error publishing PUBX satellite {} {}: {:?}", prn, name, e);
+                }
+            }
+        }
+        sv_index += 6;
+    }
 }
 
 /// Parses latitude or longitude from NMEA format and converts it to decimal degrees.
