@@ -3,9 +3,10 @@ use crate::gps_data_parser::process_gps_data;
 use crate::mqtt_handler::setup_mqtt;
 use log::{error, info};
 use serialport::SerialPort;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, BufReader};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 /// UBX-CFG-RATE command bytes for 10Hz sampling
 const UBX_CFG_RATE_10HZ: [u8; 14] = [
@@ -38,8 +39,12 @@ const QUIT_COMMAND: &str = "q";
 pub fn setup_serial_port(config: &AppConfig) -> Box<dyn serialport::SerialPort> {
     println!("Opening port: {}", config.port_name);
 
-    let mut port = serialport::new(&config.port_name, config.baud_rate as u32)
-        .timeout(std::time::Duration::from_millis(1000))
+    let port = serialport::new(&config.port_name, config.baud_rate as u32)
+        .timeout(Duration::from_millis(1000))
+        .data_bits(serialport::DataBits::Eight)
+        .flow_control(serialport::FlowControl::None)
+        .parity(serialport::Parity::None)
+        .stop_bits(serialport::StopBits::One)
         .open()
         .unwrap_or_else(|err| {
             eprintln!("Failed to open port: {}", err);
@@ -48,7 +53,7 @@ pub fn setup_serial_port(config: &AppConfig) -> Box<dyn serialport::SerialPort> 
 
     if config.set_gps_to_10hz {
         println!("Setting GPS sample rate to 10Hz");
-        if let Err(e) = gps_resolution_to_10hz(&mut port) {
+        if let Err(e) = gps_resolution_to_10hz(&mut port.try_clone().unwrap()) {
             eprintln!("Failed to set GPS sample rate: {:?}", e);
         }
     }
@@ -65,34 +70,79 @@ pub fn setup_serial_port(config: &AppConfig) -> Box<dyn serialport::SerialPort> 
 ///
 /// * `port` - A mutable reference to a boxed trait object representing a serial port.
 pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
-    let mut serial_buf = vec![0; 1024];
     let mqtt = setup_mqtt(&config);
-
     let (sender, receiver) = mpsc::channel();
 
-    thread::spawn({
-        let sender = sender.clone();
-        move || check_quit(sender)
-    });
+    // Spawn quit command listener thread
+    thread::spawn(move || check_quit(sender));
+
+    // Create a buffered reader for the port
+    let mut reader = BufReader::new(port.try_clone().unwrap());
+    let mut line_buffer = String::with_capacity(1024);
+    let mut nmea_buffer = Vec::with_capacity(1024);
 
     loop {
+        // Check for quit command
         if let Ok(message) = receiver.try_recv() {
-            if message == "q" {
+            if message == QUIT_COMMAND {
                 println!("Received quit command. Exiting the program.");
                 break;
             }
         }
 
-        match port.read(serial_buf.as_mut_slice()) {
-            Ok(t) if t > 0 => {
-                let data = &serial_buf[..t];
-                if let Err(e) = process_gps_data(data, config, mqtt.clone()) {
-                    eprintln!("Error processing GPS data: {:?}", e);
+        // Clear the line buffer for new data
+        line_buffer.clear();
+
+        // Read line by line
+        match reader.read_line(&mut line_buffer) {
+            Ok(0) => {
+                // EOF reached
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Ok(_n) => {
+                let line = line_buffer.trim();
+                
+                // Skip empty lines
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Check for start of NMEA message
+                if line.starts_with('$') {
+                    // Process any complete message in buffer
+                    if !nmea_buffer.is_empty() {
+                        if let Err(e) = process_gps_data(&nmea_buffer, config, mqtt.clone()) {
+                            eprintln!("Error processing GPS data: {:?}", e);
+                        }
+                        nmea_buffer.clear();
+                    }
+                    
+                    // Start new message
+                    nmea_buffer.extend_from_slice(line.as_bytes());
+                    nmea_buffer.push(b'\n');
+                } else if !nmea_buffer.is_empty() {
+                    // Append to existing message
+                    nmea_buffer.extend_from_slice(line.as_bytes());
+                    nmea_buffer.push(b'\n');
+
+                    // If we have a complete message (contains checksum)
+                    if line.contains('*') {
+                        if let Err(e) = process_gps_data(&nmea_buffer, config, mqtt.clone()) {
+                            eprintln!("Error processing GPS data: {:?}", e);
+                        }
+                        nmea_buffer.clear();
+                    }
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => (),
-            Err(e) => eprintln!("Serial port read error: {:?}", e),
-            _ => (),
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                // Timeout is normal, continue reading
+                continue;
+            }
+            Err(e) => {
+                eprintln!("Error reading from serial port: {:?}", e);
+                thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 }
