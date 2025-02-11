@@ -77,76 +77,65 @@ lazy_static::lazy_static! {
 ///
 /// * `data` - A slice of bytes representing received data.
 pub fn process_gps_data(
+data: &[u8],
+config: &AppConfig,
+mqtt: mqtt::Client,
+) -> Result<(), Box<dyn Error>> {
+let data_str = String::from_utf8_lossy(data);
+
+// Buffer to reconstruct split messages
+let mut message_buffer = String::new();
+
+for line in data_str.lines() {
+    let line = line.trim();
+    
+    // If line starts with $, it's a new message
+    if line.starts_with('$') {
+        // Process any complete message in buffer
+        if !message_buffer.is_empty() {
+            process_complete_message(&message_buffer, config, mqtt.clone())?;
+        }
+        message_buffer.clear();
+        message_buffer.push_str(line);
+    } else {
+        // Append continuation line
+        message_buffer.push_str(line);
+    }
+    
+    // Check if we have a complete message (ends with checksum)
+    if line.contains('*') {
+        process_complete_message(&message_buffer, config, mqtt.clone())?;
+        message_buffer.clear();
+    }
+}
+
+Ok(())
+}
+
+
+pub fn process_gps_data(
     data: &[u8],
     config: &AppConfig,
     mqtt: mqtt::Client,
 ) -> Result<(), Box<dyn Error>> {
     let data_str = String::from_utf8_lossy(data);
-    let mut message_buffer = String::new();
-    let mut in_message = false;
 
-    for line in data_str.lines() {
-        let line = line.trim();
-        
-        if line.starts_with('$') {
-            // Start of new message
-            if !message_buffer.is_empty() {
-                // Process any existing complete message
-                process_complete_message(&message_buffer, config, mqtt.clone())?;
-            }
-            message_buffer.clear();
-            message_buffer.push_str(line);
-            in_message = true;
-        } else if in_message {
-            // Continue building current message
-            message_buffer.push_str(line);
-            
-            // Check if message is complete (has checksum)
-            if line.contains('*') {
-                let parts: Vec<&str> = message_buffer.split('*').collect();
-                if parts.len() == 2 && !parts[1].is_empty() {
-                    process_complete_message(&message_buffer, config, mqtt.clone())?;
-                    message_buffer.clear();
-                    in_message = false;
-                }
-            }
+    // Early return if invalid format
+    if !data_str.starts_with('$') || !data_str.contains('*') {
+        println!("Ignored invalid message format: {}", data_str.trim());
+        return Ok(());
+    }
+
+    // Extract sentence using more efficient string operations
+    let sentence = match data_str.split('*').next() {
+        Some(s) => &s[1..], // Skip the '$' character
+        None => {
+            println!("Failed to parse message: {}", data_str.trim());
+            return Ok(());
         }
-    }
+    };
 
-    // Process any remaining complete message
-    if !message_buffer.is_empty() && message_buffer.contains('*') {
-        process_complete_message(&message_buffer, config, mqtt.clone())?;
-    }
-
-    Ok(())
-}
-
-fn process_complete_message(
-    message: &str, 
-    config: &AppConfig,
-    mqtt: mqtt::Client
-) -> Result<(), Box<dyn Error>> {
-    // Early return if message doesn't match NMEA format
-    if !message.starts_with('$') || !message.contains('*') {
-        println!("Ignored invalid message format: {}", message);
-        return Ok(());
-    }
-
-    // Extract sentence and checksum
-    let parts: Vec<&str> = message.splitn(2, '*').collect();
-    if parts.len() != 2 {
-        return Ok(());
-    }
-
-    let sentence = &parts[0][1..]; // Skip the '$'
-    let checksum = parts[1].trim();
-
-    // Validate checksum if needed
-    if checksum.len() < 2 {
-        return Ok(());
-    }
-
-    // Process the message
+    // Parse sentence type and dispatch to appropriate handler
     println!("Processing NMEA message: {}", sentence);
     
     match NmeaSentence::from_str(sentence) {
@@ -155,7 +144,7 @@ fn process_complete_message(
             parse_and_display_gsv(sentence, mqtt.clone(), config)
         }
         NmeaSentence::GGA => {
-            println!("→ Parsing GGA (Fix Information)"); 
+            println!("→ Parsing GGA (Fix Information)");
             parse_and_display_gga(sentence, mqtt.clone(), config)
         }
         NmeaSentence::RMC => {
