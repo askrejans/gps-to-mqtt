@@ -40,7 +40,7 @@ pub fn setup_serial_port(config: &AppConfig) -> Box<dyn serialport::SerialPort> 
     println!("Opening port: {}", config.port_name);
 
     let port = serialport::new(&config.port_name, config.baud_rate as u32)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_millis(5000))
         .data_bits(serialport::DataBits::Eight)
         .flow_control(serialport::FlowControl::None)
         .parity(serialport::Parity::None)
@@ -76,74 +76,110 @@ pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
     // Spawn quit command listener thread
     thread::spawn(move || check_quit(sender));
 
-    // Create a buffered reader for the port
-    let mut reader = BufReader::new(port.try_clone().unwrap());
-    let mut line_buffer = String::with_capacity(1024);
-    let mut nmea_buffer = Vec::with_capacity(1024);
-
     loop {
-        // Check for quit command
-        if let Ok(message) = receiver.try_recv() {
-            if message == QUIT_COMMAND {
-                println!("Received quit command. Exiting the program.");
-                break;
-            }
-        }
+        let mut reader = match port
+            .try_clone()
+            .and_then(|cloned_port| Ok(BufReader::new(cloned_port)))
+        {
+            Ok(reader) => reader,
+            Err(e) => {
+                error!("Failed to create reader: {}. Attempting to reconnect...", e);
+                thread::sleep(Duration::from_secs(1));
 
-        // Clear the line buffer for new data
-        line_buffer.clear();
-
-        // Read line by line
-        match reader.read_line(&mut line_buffer) {
-            Ok(0) => {
-                // EOF reached
-                thread::sleep(Duration::from_millis(10));
-                continue;
+                // Try to reopen the port
+                match serialport::new(&config.port_name, config.baud_rate as u32)
+                    .timeout(Duration::from_millis(5000))
+                    .open()
+                {
+                    Ok(new_port) => {
+                        *port = new_port;
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("Failed to reconnect: {}. Retrying...", e);
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                }
             }
-            Ok(_n) => {
-                let line = line_buffer.trim();
-                
-                // Skip empty lines
-                if line.is_empty() {
+        };
+
+        let mut line_buffer = String::with_capacity(1024);
+        let mut nmea_buffer = Vec::with_capacity(1024);
+
+        'inner: loop {
+            // Check for quit command
+            if let Ok(message) = receiver.try_recv() {
+                if message == QUIT_COMMAND {
+                    info!("Received quit command. Exiting the program.");
+                    return;
+                }
+            }
+
+            // Clear the line buffer for new data
+            line_buffer.clear();
+
+            // Read line by line
+            match reader.read_line(&mut line_buffer) {
+                Ok(0) => {
+                    // EOF reached
+                    thread::sleep(Duration::from_millis(10));
                     continue;
                 }
+                Ok(_n) => {
+                    let line = line_buffer.trim();
 
-                // Check for start of NMEA message
-                if line.starts_with('$') {
-                    // Process any complete message in buffer
-                    if !nmea_buffer.is_empty() {
-                        if let Err(e) = process_gps_data(&nmea_buffer, config, mqtt.clone()) {
-                            eprintln!("Error processing GPS data: {:?}", e);
-                        }
-                        nmea_buffer.clear();
+                    // Skip empty lines
+                    if line.is_empty() {
+                        continue;
                     }
-                    
-                    // Start new message
-                    nmea_buffer.extend_from_slice(line.as_bytes());
-                    nmea_buffer.push(b'\n');
-                } else if !nmea_buffer.is_empty() {
-                    // Append to existing message
-                    nmea_buffer.extend_from_slice(line.as_bytes());
-                    nmea_buffer.push(b'\n');
 
-                    // If we have a complete message (contains checksum)
-                    if line.contains('*') {
-                        if let Err(e) = process_gps_data(&nmea_buffer, config, mqtt.clone()) {
-                            eprintln!("Error processing GPS data: {:?}", e);
+                    // Process NMEA data
+                    if line.starts_with('$') {
+                        if !nmea_buffer.is_empty() {
+                            if let Err(e) = process_gps_data(&nmea_buffer, config, mqtt.clone()) {
+                                error!("Error processing GPS data: {:?}", e);
+                            }
+                            nmea_buffer.clear();
                         }
-                        nmea_buffer.clear();
+                        nmea_buffer.extend_from_slice(line.as_bytes());
+                        nmea_buffer.push(b'\n');
+                    } else if !nmea_buffer.is_empty() {
+                        nmea_buffer.extend_from_slice(line.as_bytes());
+                        nmea_buffer.push(b'\n');
+
+                        if line.contains('*') {
+                            if let Err(e) = process_gps_data(&nmea_buffer, config, mqtt.clone()) {
+                                error!("Error processing GPS data: {:?}", e);
+                            }
+                            nmea_buffer.clear();
+                        }
+                    }
+                }
+                Err(e) => {
+                    match e.kind() {
+                        io::ErrorKind::TimedOut => {
+                            // Timeout is normal, continue reading
+                            continue;
+                        }
+                        io::ErrorKind::BrokenPipe => {
+                            error!("Broken pipe detected. Attempting to reconnect...");
+                            break 'inner;
+                        }
+                        _ => {
+                            error!(
+                                "Error reading from serial port: {:?}. Attempting to reconnect...",
+                                e
+                            );
+                            break 'inner;
+                        }
                     }
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                // Timeout is normal, continue reading
-                continue;
-            }
-            Err(e) => {
-                eprintln!("Error reading from serial port: {:?}", e);
-                thread::sleep(Duration::from_millis(100));
-            }
         }
+
+        // Add delay before reconnection attempt
+        thread::sleep(Duration::from_secs(1));
     }
 }
 

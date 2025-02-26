@@ -1,15 +1,13 @@
 use log::{debug, error};
 use paho_mqtt as mqtt;
-use std::{process, time::Duration};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::{process, time::Duration};
 use thiserror::Error;
-
 
 lazy_static::lazy_static! {
     static ref LAST_VALUES: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 }
-
 
 #[derive(Error, Debug)]
 pub enum PublishError {
@@ -93,14 +91,15 @@ pub fn publish_if_changed(
     }
 
     // Get lock on last values
-    let mut last_values = LAST_VALUES
-        .lock()
-        .map_err(|_| PublishError::LockError)?;
+    let mut last_values = LAST_VALUES.lock().map_err(|_| PublishError::LockError)?;
 
     // Check if value has changed
-    if last_values.get(topic).map_or(true, |last_value| last_value != payload) {
+    if last_values
+        .get(topic)
+        .map_or(true, |last_value| last_value != payload)
+    {
         debug!("Publishing changed value to topic: {}", topic);
-        
+
         // Create and publish message
         let msg = mqtt::MessageBuilder::new()
             .topic(topic)
@@ -113,7 +112,7 @@ pub fn publish_if_changed(
 
         // Update stored value after successful publish
         last_values.insert(topic.to_string(), payload.to_string());
-        
+
         Ok(())
     } else {
         debug!("Skipping publish - value unchanged for topic: {}", topic);

@@ -77,46 +77,45 @@ lazy_static::lazy_static! {
 ///
 /// * `data` - A slice of bytes representing received data.
 pub fn process_gps_data(
-data: &[u8],
-config: &AppConfig,
-mqtt: mqtt::Client,
+    data: &[u8],
+    config: &AppConfig,
+    mqtt: mqtt::Client,
 ) -> Result<(), Box<dyn Error>> {
-let data_str = String::from_utf8_lossy(data);
+    let data_str = String::from_utf8_lossy(data);
 
-// Buffer to reconstruct split messages
-let mut message_buffer = String::new();
+    // Buffer to reconstruct split messages
+    let mut message_buffer = String::new();
 
-for line in data_str.lines() {
-    let line = line.trim();
-    
-    // If line starts with $, it's a new message
-    if line.starts_with('$') {
-        // Process any complete message in buffer
-        if !message_buffer.is_empty() {
-            process_complete_message(&message_buffer, config, mqtt.clone())?;
+    for line in data_str.lines() {
+        let line = line.trim();
+
+        // If line starts with $, it's a new message
+        if line.starts_with('$') {
+            // Process any complete message in buffer
+            if !message_buffer.is_empty() {
+                process_complete_message(&message_buffer, config, mqtt.clone())?;
+            }
+            message_buffer.clear();
+            message_buffer.push_str(line);
+        } else {
+            // Append continuation line
+            message_buffer.push_str(line);
         }
-        message_buffer.clear();
-        message_buffer.push_str(line);
-    } else {
-        // Append continuation line
-        message_buffer.push_str(line);
-    }
-    
-    // Check if we have a complete message (ends with checksum)
-    if line.contains('*') {
-        process_complete_message(&message_buffer, config, mqtt.clone())?;
-        message_buffer.clear();
-    }
-}
 
-Ok(())
-}
+        // Check if we have a complete message (ends with checksum)
+        if line.contains('*') {
+            process_complete_message(&message_buffer, config, mqtt.clone())?;
+            message_buffer.clear();
+        }
+    }
 
+    Ok(())
+}
 
 fn process_complete_message(
-    message: &str, 
+    message: &str,
     config: &AppConfig,
-    mqtt: mqtt::Client
+    mqtt: mqtt::Client,
 ) -> Result<(), Box<dyn Error>> {
     // Early return if invalid format
     if !message.starts_with('$') || !message.contains('*') {
@@ -134,44 +133,20 @@ fn process_complete_message(
     };
 
     // Parse sentence type and dispatch to appropriate handler
-    
+
     match NmeaSentence::from_str(sentence) {
-        NmeaSentence::GSV => {
-            parse_and_display_gsv(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::GGA => {
-            parse_and_display_gga(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::RMC => {
-            parse_and_display_rmc(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::VTG => {
-            parse_and_display_vtg(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::GSA => {
-            parse_and_display_gsa(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::GLL => {
-            parse_and_display_gll(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::TXT => {
-            parse_and_display_gntxt(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::GRS => {
-            parse_and_display_grs(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::GST => {
-            parse_and_display_gst(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::GNS => {
-            parse_and_display_gns(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::VLW => {
-            parse_and_display_vlw(sentence, mqtt.clone(), config)
-        }
-        NmeaSentence::PBX => {
-            parse_and_display_pubx(sentence, mqtt.clone(), config)
-        }
+        NmeaSentence::GSV => parse_and_display_gsv(sentence, mqtt.clone(), config),
+        NmeaSentence::GGA => parse_and_display_gga(sentence, mqtt.clone(), config),
+        NmeaSentence::RMC => parse_and_display_rmc(sentence, mqtt.clone(), config),
+        NmeaSentence::VTG => parse_and_display_vtg(sentence, mqtt.clone(), config),
+        NmeaSentence::GSA => parse_and_display_gsa(sentence, mqtt.clone(), config),
+        NmeaSentence::GLL => parse_and_display_gll(sentence, mqtt.clone(), config),
+        NmeaSentence::TXT => parse_and_display_gntxt(sentence, mqtt.clone(), config),
+        NmeaSentence::GRS => parse_and_display_grs(sentence, mqtt.clone(), config),
+        NmeaSentence::GST => parse_and_display_gst(sentence, mqtt.clone(), config),
+        NmeaSentence::GNS => parse_and_display_gns(sentence, mqtt.clone(), config),
+        NmeaSentence::VLW => parse_and_display_vlw(sentence, mqtt.clone(), config),
+        NmeaSentence::PBX => parse_and_display_pubx(sentence, mqtt.clone(), config),
         NmeaSentence::Unknown => {
             println!("→ Ignored unknown sentence type: {}", sentence);
         }
@@ -546,10 +521,10 @@ fn parse_and_display_grs(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
     if parts.len() >= 15 {
         let time = parts[1];
         let mode = parts[2];
-        let residuals: Vec<f64> = parts[3..15].iter()
+        let residuals: Vec<f64> = parts[3..15]
+            .iter()
             .map(|s| s.parse::<f64>().unwrap_or(0.0))
             .collect();
-
 
         // Publish mode
         if let Err(e) = publish_message(
@@ -565,11 +540,11 @@ fn parse_and_display_grs(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         for (i, residual) in residuals.iter().enumerate() {
             if let Err(e) = publish_message(
                 &mqtt,
-                &format!("{}GRS/RESIDUAL/{}", config.mqtt_base_topic, i+1),
+                &format!("{}GRS/RESIDUAL/{}", config.mqtt_base_topic, i + 1),
                 &residual.to_string(),
                 0,
             ) {
-                println!("Error publishing residual {}: {:?}", i+1, e);
+                println!("Error publishing residual {}: {:?}", i + 1, e);
             }
         }
     }
@@ -624,7 +599,6 @@ fn parse_and_display_gns(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let altitude = parts[9].parse::<f64>().unwrap_or(0.0);
         let separation = parts[10].parse::<f64>().unwrap_or(0.0);
 
-
         let metrics = [
             ("LAT", latitude),
             ("LON", longitude),
@@ -672,10 +646,7 @@ fn parse_and_display_vlw(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
         let total_water = parts[1].parse::<f64>().unwrap_or(0.0);
         let total_ground = parts[5].parse::<f64>().unwrap_or(0.0);
 
-        let metrics = [
-            ("WATER", total_water),
-            ("GROUND", total_ground),
-        ];
+        let metrics = [("WATER", total_water), ("GROUND", total_ground)];
 
         for (name, value) in metrics.iter() {
             if let Err(e) = publish_message(
@@ -775,11 +746,7 @@ fn parse_pubx_svstatus(data: &str, mqtt: mqtt::Client, config: &AppConfig) {
             parts[sv_index + 3].parse::<i32>(),
             parts[sv_index + 4].parse::<i32>(),
         ) {
-            let sv_metrics = [
-                ("EL", elevation),
-                ("AZ", azimuth),
-                ("SNR", snr),
-            ];
+            let sv_metrics = [("EL", elevation), ("AZ", azimuth), ("SNR", snr)];
 
             for (name, value) in sv_metrics.iter() {
                 if let Err(e) = publish_message(
