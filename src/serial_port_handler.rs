@@ -76,27 +76,61 @@ pub fn read_from_port(port: &mut Box<dyn SerialPort>, config: &AppConfig) {
     // Spawn quit command listener thread
     thread::spawn(move || check_quit(sender));
 
+    let mut consecutive_failures = 0;
+    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
     loop {
+        info!("Attempting to read from port {}", config.port_name);
+
         let mut reader = match port
             .try_clone()
             .and_then(|cloned_port| Ok(BufReader::new(cloned_port)))
         {
-            Ok(reader) => reader,
+            Ok(reader) => {
+                consecutive_failures = 0; // Reset failure counter on successful connection
+                info!("Successfully created reader for port {}", config.port_name);
+                reader
+            }
             Err(e) => {
-                error!("Failed to create reader: {}. Attempting to reconnect...", e);
-                thread::sleep(Duration::from_secs(1));
+                consecutive_failures += 1;
+                error!(
+                    "Failed to create reader: {}. Attempt {}/{}",
+                    e, consecutive_failures, MAX_CONSECUTIVE_FAILURES
+                );
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    error!("Maximum reconnection attempts reached. Waiting 10 seconds before trying again...");
+                    thread::sleep(Duration::from_secs(10));
+                    consecutive_failures = 0;
+                }
 
                 // Try to reopen the port
                 match serialport::new(&config.port_name, config.baud_rate as u32)
                     .timeout(Duration::from_millis(5000))
+                    .data_bits(serialport::DataBits::Eight)
+                    .flow_control(serialport::FlowControl::None)
+                    .parity(serialport::Parity::None)
+                    .stop_bits(serialport::StopBits::One)
                     .open()
                 {
                     Ok(new_port) => {
+                        info!("Successfully reopened port {}", config.port_name);
+                        if config.set_gps_to_10hz {
+                            if let Err(e) =
+                                gps_resolution_to_10hz(&mut new_port.try_clone().unwrap())
+                            {
+                                error!("Failed to set GPS sample rate after reconnect: {:?}", e);
+                            }
+                        }
                         *port = new_port;
+                        thread::sleep(Duration::from_secs(1));
                         continue;
                     }
                     Err(e) => {
-                        error!("Failed to reconnect: {}. Retrying...", e);
+                        error!(
+                            "Failed to reconnect to {}: {}. Retrying...",
+                            config.port_name, e
+                        );
                         thread::sleep(Duration::from_secs(1));
                         continue;
                     }
