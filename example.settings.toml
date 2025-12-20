@@ -1,6 +1,32 @@
+# GPS to MQTT Configuration File
+
+# Serial Port Configuration
 port_name = "/dev/ttyACM0"
 baud_rate = 9600
 set_gps_to_10hz = false
+
+# MQTT Configuration
 mqtt_host = "localhost"
 mqtt_port = 1883
-mqtt_base_topic = "/GOLF86/GPS/"
+mqtt_client_id = "gps-to-mqtt"
+mqtt_base_topic = "/GOLF86/GPS"
+mqtt_reconnect_max_attempts = 0  # 0 = infinite retries
+
+# Logging Configuration
+log_level = "info"  # trace, debug, info, warn, error
+log_file_path = "/var/log/gps-to-mqtt/gps-to-mqtt.log"  # Optional, for service mode
+
+# TUI Configuration
+tui_refresh_rate_ms = 100  # Refresh rate in milliseconds
+max_log_buffer_size = 1000  # Maximum number of log entries to keep in TUI
+
+# Telemetry Configuration
+telemetry_enabled = true  # Enable telemetry calculations (acceleration, g-forces, etc.)
+telemetry_smoothing_window = 3  # Number of samples for moving average smoothing
+
+# Track/Lap Timing Configuration
+track_mode = "disabled"  # Options: "disabled", "manual", "learn", "gpx"
+# track_start_lat = 40.7128  # Start/Finish latitude (for manual mode)
+# track_start_lon = -74.0060  # Start/Finish longitude (for manual mode)
+track_geofence_radius = 15.0  # Geofence radius in meters for start/finish line
+# track_gpx_file = "/path/to/track.gpx"  # GPX file path (for gpx mode)

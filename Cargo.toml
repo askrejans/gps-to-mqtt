@@ -1,14 +1,41 @@
 [package]
 name = "gps-to-mqtt"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
+authors = ["askrejans"]
+description = "GPS to MQTT bridge"
+license = "MIT"
+repository = "https://github.com/askrejans/gps-to-mqtt"
 
 [dependencies]
-serialport = "4.6.1"
-config = "0.15.5"
-paho-mqtt = "0.12.5"
-futures = "0.3.31"
-lazy_static = "1.5.0"
-gumdrop = "0.8.1"
-thiserror = "2.0.11"
-log = "0.4.25"
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+
+# Serial port
+serialport = "4.8.1"
+
+# Configuration
+config = "0.15.19"
+clap = { version = "4.5", features = ["derive"] }
+
+# MQTT (async client)
+rumqttc = "0.25.1"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-appender = "0.2"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.29.0"
+
+# Error handling
+thiserror = "2.0.17"
+anyhow = "1.0"
+
+# Data structures
+chrono = "0.4"
+
+# XML parsing (for GPX files)
+quick-xml = "0.38.4"

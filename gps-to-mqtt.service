@@ -1,0 +1,38 @@
+[Unit]
+Description=GPS to MQTT Bridge Service
+Documentation=https://github.com/askrejans/gps-to-mqtt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gps
+Group=gps
+WorkingDirectory=/opt/gps-to-mqtt
+ExecStart=/opt/gps-to-mqtt/gps-to-mqtt --mode service --config /etc/g86-car-telemetry/gps-to-mqtt.toml
+
+# Restart configuration
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/gps-to-mqtt
+
+# Resource limits
+LimitNOFILE=65536
+MemoryLimit=512M
+
+# Environment
+Environment="RUST_LOG=info"
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gps-to-mqtt
+
+[Install]
+WantedBy=multi-user.target
