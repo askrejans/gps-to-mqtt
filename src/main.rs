@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 #[command(about = "GPS to MQTT bridge", long_about = None)]
 struct Args {
     /// Application mode: tui, cli, or service
-    #[arg(short, long, value_enum, default_value = "cli")]
+    #[arg(short, long, value_enum, default_value = "tui")]
     mode: CliMode,
 
     /// Path to configuration file

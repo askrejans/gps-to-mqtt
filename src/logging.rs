@@ -52,16 +52,19 @@ fn init_tui_logging(log_level: Level) -> Result<()> {
 fn init_cli_logging(log_level: Level) -> Result<()> {
     let filter = EnvFilter::from_default_env()
         .add_directive(log_level.into())
-        .add_directive("gps_to_mqtt=trace".parse()?);
+        .add_directive("rumqttc=warn".parse()?)
+        .add_directive("tokio=warn".parse()?)
+        .add_directive("gps_to_mqtt=info".parse()?);
 
     tracing_subscriber::registry()
         .with(filter)
         .with(
             fmt::layer()
-                .with_target(true)
+                .compact()
+                .with_target(false)
                 .with_thread_ids(false)
                 .with_file(false)
-                .with_line_number(true),
+                .with_line_number(false),
         )
         .init();
 

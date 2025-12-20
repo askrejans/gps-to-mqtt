@@ -360,6 +360,23 @@ async fn publish_gps_data(
         publish_if_changed(client, base_topic, "/HEADING_RATE_GPS", format!("{:.2}", heading_rate), last_published).await?;
     }
 
+    // Publish individual satellite data
+    for (prn, sat) in &gps_data.satellites {
+        let sat_topic = format!("/SAT/{}", prn);
+        
+        // Create satellite info string: "PRN,System,Elevation,Azimuth,SNR"
+        let sat_info = format!(
+            "{},{:?},{},{},{}",
+            prn,
+            sat.system,
+            sat.elevation.map(|e| e.to_string()).unwrap_or_else(|| "N/A".to_string()),
+            sat.azimuth.map(|a| a.to_string()).unwrap_or_else(|| "N/A".to_string()),
+            sat.snr.map(|s| s.to_string()).unwrap_or_else(|| "N/A".to_string())
+        );
+        
+        publish_if_changed(client, base_topic, &sat_topic, sat_info, last_published).await?;
+    }
+
     Ok(())
 }
 
