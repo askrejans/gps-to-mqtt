@@ -219,17 +219,26 @@ Data is published to the following topics (with configurable base):
 
 ### Core GPS Data
 - `{base_topic}/LAT` - Latitude (decimal degrees)
-- `{base_topic}/LON` - Longitude (decimal degrees)
+- `{base_topic}/LNG` - Longitude (decimal degrees)
 - `{base_topic}/ALT` - Altitude (meters)
-- `{base_topic}/SPEED` - Speed (km/h)
-- `{base_topic}/COURSE` - Course/heading (degrees)
+- `{base_topic}/SPD` - Speed (km/h, primary)
+- `{base_topic}/SPD_KPH` - Speed (km/h)
+- `{base_topic}/SPD_KTS` - Speed (knots)
+- `{base_topic}/CRS` - Course/heading (degrees)
 - `{base_topic}/SATS` - Satellites used in fix
-- `{base_topic}/SATS_IN_VIEW` - Total satellites in view
+- `{base_topic}/SAT/GLOBAL/NUM` - Total satellites in view
 - `{base_topic}/HDOP` - Horizontal dilution of precision
 - `{base_topic}/VDOP` - Vertical dilution of precision
 - `{base_topic}/PDOP` - Position dilution of precision
-- `{base_topic}/TIME` - GPS time (HH:MM:SS)
-- `{base_topic}/DATE` - GPS date (YYYY-MM-DD)
+- `{base_topic}/TME` - GPS time (HH:MM:SS)
+- `{base_topic}/DTE` - GPS date (DD.MM.YYYY)
+- `{base_topic}/QTY` - Fix quality (0=Invalid, 1=GPS, 2=DGPS, 3=PPS, 4=RTK, 5=Float RTK, 6=Estimated, 7=Manual, 8=Simulation)
+
+### Satellite Data
+- `{base_topic}/SAT/VEHICLES/{prn}` - Individual satellite info (PRN, Type, Elevation, Azimuth, SNR, In View status)
+- `{base_topic}/SAT/GLOBAL/ANTSTATUS` - Antenna status
+- `{base_topic}/SAT/GLOBAL/PF` - Position fix
+- `{base_topic}/SAT/GLOBAL/GNSS_OTP` - GNSS OTP status
 
 ### Telemetry Data (Racing Features)
 - `{base_topic}/ACCELERATION` - Longitudinal acceleration (m/s²)
@@ -246,12 +255,10 @@ Data is published to the following topics (with configurable base):
 - `{base_topic}/BEST_LAP` - Best lap time (seconds)
 - `{base_topic}/SECTOR_1`, `/SECTOR_2`, etc. - Sector times (seconds)
 
-### Position Accuracy
+### Position Accuracy (Advanced)
 - `{base_topic}/POSITION_ACCURACY` - Overall position accuracy (meters)
-- `{base_topic}/ACCURACY_LAT` - Latitude accuracy std deviation
-- `{base_topic}/ACCURACY_LON` - Longitude accuracy std deviation
-- `{base_topic}/ACCURACY_ALT` - Altitude accuracy std deviation
 - `{base_topic}/TRUE_HEADING` - True heading (degrees)
+- `{base_topic}/HEADING_RATE_GPS` - Heading rate from GPS (deg/s)
 
 All messages are published with QoS 0 and retained flag for last known values.
 
@@ -340,6 +347,29 @@ rustup target add armv7-unknown-linux-gnueabihf
 # Build
 cargo build --release --target armv7-unknown-linux-gnueabihf
 ```
+
+## Troubleshooting
+
+### Serial Port Access
+
+If you get permission errors:
+
+```bash
+# Add your user to the dialout group
+sudo usermod -a -G dialout $USER
+# Log out and back in for changes to take effect
+```
+
+### MQTT Connection Issues
+
+- Verify the MQTT broker is running: `mosquitto_sub -h localhost -t '#' -v`
+- Check firewall rules if connecting to a remote broker
+- Enable debug logging: `--log-level debug`
+
+### TUI Display Issues
+
+- Ensure your terminal supports UTF-8 and has at least 80x24 character dimensions
+- Try a different terminal emulator if rendering issues occur
 
 ## License
 

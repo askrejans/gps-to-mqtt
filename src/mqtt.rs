@@ -308,16 +308,21 @@ async fn publish_gps_data(
         publish_if_changed(client, base_topic, "/LAT", lat.to_string(), last_published).await?;
     }
     if let Some(lon) = gps_data.navigation.longitude {
-        publish_if_changed(client, base_topic, "/LON", lon.to_string(), last_published).await?;
+        publish_if_changed(client, base_topic, "/LNG", lon.to_string(), last_published).await?;
     }
     if let Some(alt) = gps_data.navigation.altitude {
         publish_if_changed(client, base_topic, "/ALT", alt.to_string(), last_published).await?;
     }
     if let Some(speed) = gps_data.navigation.speed_kph {
-        publish_if_changed(client, base_topic, "/SPEED", speed.to_string(), last_published).await?;
+        publish_if_changed(client, base_topic, "/SPD_KPH", speed.to_string(), last_published).await?;
+        // Also publish as SPD for backwards compatibility
+        publish_if_changed(client, base_topic, "/SPD", speed.to_string(), last_published).await?;
+    }
+    if let Some(speed_knots) = gps_data.navigation.speed_knots {
+        publish_if_changed(client, base_topic, "/SPD_KTS", speed_knots.to_string(), last_published).await?;
     }
     if let Some(course) = gps_data.navigation.course {
-        publish_if_changed(client, base_topic, "/COURSE", course.to_string(), last_published).await?;
+        publish_if_changed(client, base_topic, "/CRS", course.to_string(), last_published).await?;
     }
 
     // Publish fix data
@@ -334,15 +339,30 @@ async fn publish_gps_data(
         publish_if_changed(client, base_topic, "/PDOP", format!("{:.2}", pdop), last_published).await?;
     }
     if let Some(time) = gps_data.fix.time {
-        publish_if_changed(client, base_topic, "/TIME", time.to_string(), last_published).await?;
+        publish_if_changed(client, base_topic, "/TME", time.to_string(), last_published).await?;
     }
     if let Some(date) = gps_data.fix.date {
-        publish_if_changed(client, base_topic, "/DATE", date.to_string(), last_published).await?;
+        publish_if_changed(client, base_topic, "/DTE", date.to_string(), last_published).await?;
+    }
+    if let Some(ref quality) = gps_data.fix.fix_quality {
+        // Convert FixQuality enum to number matching old behavior
+        let quality_num = match quality {
+            crate::models::FixQuality::Invalid => 0,
+            crate::models::FixQuality::GpsFix => 1,
+            crate::models::FixQuality::DgpsFix => 2,
+            crate::models::FixQuality::PpsFix => 3,
+            crate::models::FixQuality::Rtk => 4,
+            crate::models::FixQuality::FloatRtk => 5,
+            crate::models::FixQuality::Estimated => 6,
+            crate::models::FixQuality::Manual => 7,
+            crate::models::FixQuality::Simulation => 8,
+        };
+        publish_if_changed(client, base_topic, "/QTY", quality_num.to_string(), last_published).await?;
     }
 
-    // Publish satellite count
+    // Publish total satellite count
     if let Some(count) = gps_data.satellites_in_view {
-        publish_if_changed(client, base_topic, "/SATS_IN_VIEW", count.to_string(), last_published).await?;
+        publish_if_changed(client, base_topic, "/SAT/GLOBAL/NUM", count.to_string(), last_published).await?;
     }
 
     // Publish position accuracy if available
@@ -362,16 +382,18 @@ async fn publish_gps_data(
 
     // Publish individual satellite data
     for (prn, sat) in &gps_data.satellites {
-        let sat_topic = format!("/SAT/{}", prn);
+        let sat_topic = format!("/SAT/VEHICLES/{}", prn);
         
-        // Create satellite info string: "PRN,System,Elevation,Azimuth,SNR"
+        // Create satellite info string matching old format: "PRN: X, Type: Y, Elevation: Z, Azimuth: A, SNR: S, In View: true/false"
+        let in_view = sat.snr.unwrap_or(0) > 0;
         let sat_info = format!(
-            "{},{:?},{},{},{}",
+            "PRN: {}, Type: {:?}, Elevation: {}, Azimuth: {}, SNR: {}, In View: {}",
             prn,
             sat.system,
             sat.elevation.map(|e| e.to_string()).unwrap_or_else(|| "N/A".to_string()),
             sat.azimuth.map(|a| a.to_string()).unwrap_or_else(|| "N/A".to_string()),
-            sat.snr.map(|s| s.to_string()).unwrap_or_else(|| "N/A".to_string())
+            sat.snr.map(|s| s.to_string()).unwrap_or_else(|| "N/A".to_string()),
+            in_view
         );
         
         publish_if_changed(client, base_topic, &sat_topic, sat_info, last_published).await?;
