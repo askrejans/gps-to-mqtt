@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::parser::{parse_nmea_sentence, GpsEvent};
 use anyhow::{Context, Result};
 use serialport::SerialPort;
-use std::io::{BufRead, BufReader};
+use std::io::Read;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -119,51 +119,79 @@ fn read_from_port(
     port: &mut Box<dyn SerialPort>,
     event_tx: &mpsc::Sender<GpsEvent>,
 ) -> Result<()> {
-    let mut reader = BufReader::new(port);
-    let mut line = String::new();
+    let mut buffer = Vec::new();
+    let mut temp_buf = [0u8; 512];
 
     loop {
-        line.clear();
-        
-        match reader.read_line(&mut line) {
+        // Read raw bytes instead of using BufReader with read_line
+        match port.read(&mut temp_buf) {
             Ok(0) => {
-                // EOF
-                info!("End of serial port stream");
-                break;
+                // EOF - this shouldn't happen with serial ports
+                warn!("Unexpected end of serial port stream");
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
             }
-            Ok(_) => {
-                let trimmed = line.trim();
+            Ok(n) => {
+                // Append received bytes to buffer
+                buffer.extend_from_slice(&temp_buf[..n]);
                 
-                // Only process NMEA sentences
-                if trimmed.starts_with('$') && trimmed.contains('*') {
-                    debug!("Received: {}", trimmed);
+                // Process complete lines from buffer
+                while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                    // Extract line (including the newline)
+                    let line_bytes: Vec<u8> = buffer.drain(..=newline_pos).collect();
                     
-                    // Parse the sentence
-                    match parse_nmea_sentence(trimmed) {
-                        Ok(events) => {
-                            for event in events {
-                                // Send events to the processing task
-                                if let Err(e) = event_tx.blocking_send(event) {
-                                    error!("Failed to send GPS event: {}", e);
-                                    return Err(anyhow::anyhow!("Event channel closed"));
+                    // Try to convert to UTF-8, skip if invalid
+                    match String::from_utf8(line_bytes) {
+                        Ok(line) => {
+                            let trimmed = line.trim();
+                            
+                            // Only process NMEA sentences
+                            if trimmed.starts_with('$') && trimmed.contains('*') {
+                                debug!("Received: {}", trimmed);
+                                
+                                // Parse the sentence
+                                match parse_nmea_sentence(trimmed) {
+                                    Ok(events) => {
+                                        for event in events {
+                                            // Send events to the processing task
+                                            if let Err(e) = event_tx.blocking_send(event) {
+                                                error!("Failed to send GPS event: {}", e);
+                                                return Err(anyhow::anyhow!("Event channel closed"));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!("Failed to parse sentence: {}", e);
+                                    }
                                 }
                             }
                         }
-                        Err(e) => {
-                            debug!("Failed to parse sentence: {}", e);
+                        Err(_) => {
+                            // Skip invalid UTF-8 data (likely binary UBX messages or noise)
+                            debug!("Skipping non-UTF-8 data");
                         }
                     }
+                }
+                
+                // Keep buffer size reasonable - if it gets too large without finding a newline,
+                // something is wrong, so discard old data
+                if buffer.len() > 4096 {
+                    warn!("Serial buffer overflow, clearing");
+                    buffer.clear();
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 // Timeout is normal, continue reading
                 continue;
             }
+            Err(ref e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                // Broken pipe might be recoverable
+                warn!("Broken pipe detected on serial port");
+                return Err(anyhow::anyhow!("Broken pipe"));
+            }
             Err(e) => {
                 return Err(anyhow::anyhow!("Error reading from serial port: {}", e));
             }
         }
     }
-
-    Ok(())
 }

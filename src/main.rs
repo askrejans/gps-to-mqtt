@@ -67,31 +67,77 @@ async fn main() -> Result<()> {
         config.log_level = log_level;
     }
 
-    // Initialize logging
-    logging::init_logging(&config)?;
-
-    info!("Starting GPS to MQTT application in {:?} mode", config.mode);
-
-    // Display welcome message for TUI and CLI modes
+    // Display welcome message for TUI and CLI modes BEFORE logging init
     if matches!(config.mode, AppMode::Tui | AppMode::Cli) {
         display_welcome();
     }
 
-    // Run the application
-    if let Err(e) = run_application(config).await {
+    // Run the application based on mode
+    if let Err(e) = match config.mode {
+        AppMode::Tui => run_tui_application(config).await,
+        _ => run_standard_application(config).await,
+    } {
         error!("Application error: {}", e);
         std::process::exit(1);
     }
 
+    Ok(())
+}
+
+/// Run application in TUI mode with log buffer
+async fn run_tui_application(config: config::AppConfig) -> Result<()> {
+    // Create log buffer and initialize logging with it
+    let log_buffer = Arc::new(RwLock::new(Vec::<String>::new()));
+    logging::init_logging_with_buffer(&config, Some(log_buffer.clone()))?;
+    
+    info!("Starting GPS to MQTT application in TUI mode");
+    
+    // Create shared application state
+    let app_state = Arc::new(RwLock::new(AppState::new()));
+
+    // Create channels for communication between tasks
+    let (gps_event_tx, gps_event_rx) = mpsc::channel::<GpsEvent>(100);
+    let (gps_data_tx, gps_data_rx) = mpsc::channel::<GpsData>(10);
+    let (mqtt_status_tx, mqtt_status_rx) = mpsc::channel::<MqttStatus>(10);
+
+    // Spawn GPS event processing task
+    let state_clone = app_state.clone();
+    let data_tx_clone = gps_data_tx.clone();
+    tokio::spawn(async move {
+        process_gps_events(gps_event_rx, state_clone, data_tx_clone).await;
+    });
+
+    // Spawn MQTT status update task
+    let state_clone = app_state.clone();
+    tokio::spawn(async move {
+        update_mqtt_status(mqtt_status_rx, state_clone).await;
+    });
+
+    // Start serial port reading
+    serial::spawn_serial_task(config.clone(), gps_event_tx).await?;
+    info!("Serial port task started");
+
+    // Start MQTT client
+    mqtt::spawn_mqtt_task(config.clone(), gps_data_rx, mqtt_status_tx).await?;
+    info!("MQTT task started");
+
+    // Run TUI interface
+    let tui_app = ui::TuiApp::new(app_state, log_buffer);
+    tui_app.run(config).await?;
+    
     info!("Application shutdown complete");
     Ok(())
 }
 
-/// Run the main application logic
-async fn run_application(config: config::AppConfig) -> Result<()> {
+/// Run application in CLI or Service mode
+async fn run_standard_application(config: config::AppConfig) -> Result<()> {
+    // Initialize logging normally (to stdout/file)
+    logging::init_logging(&config)?;
+    
+    info!("Starting GPS to MQTT application in {:?} mode", config.mode);
+
     // Create shared application state
     let app_state = Arc::new(RwLock::new(AppState::new()));
-    let log_buffer = Arc::new(RwLock::new(Vec::<String>::new()));
 
     // Create channels for communication between tasks
     let (gps_event_tx, gps_event_rx) = mpsc::channel::<GpsEvent>(100);
@@ -121,10 +167,6 @@ async fn run_application(config: config::AppConfig) -> Result<()> {
 
     // Run mode-specific interface
     match config.mode {
-        AppMode::Tui => {
-            let tui_app = ui::TuiApp::new(app_state, log_buffer);
-            tui_app.run(config).await?;
-        }
         AppMode::Cli => {
             info!("Running in CLI mode. Press Ctrl+C to quit.");
             service::wait_for_shutdown_signal().await;
@@ -133,8 +175,12 @@ async fn run_application(config: config::AppConfig) -> Result<()> {
             info!("Running in service mode");
             service::wait_for_shutdown_signal().await;
         }
+        _ => {
+            error!("Invalid mode for run_standard_application");
+        }
     }
-
+    
+    info!("Application shutdown complete");
     Ok(())
 }
 

@@ -56,9 +56,8 @@ impl TuiApp {
         // Main loop
         loop {
             let state = self.state.read().await.clone();
-            let logs = self.log_buffer.read().await.clone();
 
-            terminal.draw(|f| self.draw(f, &state, &logs))?;
+            terminal.draw(|f| self.draw(f, &state))?;
 
             // Handle events with timeout
             if event::poll(refresh_rate)? {
@@ -104,7 +103,7 @@ impl TuiApp {
     }
 
     /// Draw the UI
-    fn draw(&self, f: &mut Frame, state: &AppState, logs: &[String]) {
+    fn draw(&self, f: &mut Frame, state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -121,7 +120,7 @@ impl TuiApp {
         match self.selected_tab {
             0 => self.render_overview(f, chunks[1], state),
             1 => self.render_satellites(f, chunks[1], state),
-            2 => self.render_logs(f, chunks[1], logs),
+            2 => self.render_full_logs(f, chunks[1]),
             _ => {}
         }
 
@@ -176,8 +175,11 @@ impl TuiApp {
         let connection_widget = create_connection_widget(state);
         f.render_widget(connection_widget, left_chunks[3]);
 
-        // Right side: scrolling logs
-        self.render_log_panel(f, main_chunks[1], &state.gps_data.messages);
+        // Right side: scrolling application logs from log buffer
+        let logs = self.log_buffer.try_read()
+            .map(|b| b.clone())
+            .unwrap_or_default();
+        self.render_log_panel(f, main_chunks[1], &logs);
     }
 
     /// Render compact log panel
@@ -234,8 +236,12 @@ impl TuiApp {
         f.render_widget(sky_chart, chunks[1]);
     }
 
-    /// Render logs tab
-    fn render_logs(&self, f: &mut Frame, area: Rect, logs: &[String]) {
+    /// Render full logs tab
+    fn render_full_logs(&self, f: &mut Frame, area: Rect) {
+        let logs = self.log_buffer.try_read()
+            .map(|b| b.clone())
+            .unwrap_or_default();
+            
         let log_items: Vec<ListItem> = logs
             .iter()
             .rev() // Show newest first
@@ -255,7 +261,7 @@ impl TuiApp {
             .collect();
 
         let logs_widget = List::new(log_items)
-            .block(Block::default().borders(Borders::ALL).title("Logs"));
+            .block(Block::default().borders(Borders::ALL).title("Application Logs"));
 
         f.render_widget(logs_widget, area);
     }
