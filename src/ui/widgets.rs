@@ -139,6 +139,7 @@ pub fn create_fix_widget(gps_data: &GpsData) -> Paragraph<'static> {
 }
 
 /// Create messages widget
+#[allow(dead_code)]
 pub fn create_messages_widget(gps_data: &GpsData) -> Paragraph {
     let messages: Vec<Line> = gps_data
         .messages
@@ -322,4 +323,92 @@ pub fn create_satellite_sky_chart(gps_data: &GpsData) -> Canvas<'static, impl Fn
                 }
             }
         })
+}
+
+/// Create telemetry widget showing racing metrics
+pub fn create_telemetry_widget(gps_data: &GpsData) -> Paragraph<'static> {
+    // Show available data from navigation
+    let speed_knots = gps_data
+        .navigation
+        .speed_knots
+        .map(|v| format!("{:.1} kts", v))
+        .unwrap_or_else(|| "N/A".to_string());
+
+    let heading_rate = gps_data
+        .navigation
+        .heading_rate
+        .map(|v| format!("{:.1}°/s", v))
+        .unwrap_or_else(|| "N/A".to_string());
+
+    let true_heading = gps_data
+        .navigation
+        .true_heading
+        .map(|v| format!("{:.1}°", v))
+        .unwrap_or_else(|| "N/A".to_string());
+
+    let accuracy = gps_data
+        .navigation
+        .position_accuracy
+        .map(|v| format!("{:.1} m", v))
+        .unwrap_or_else(|| "N/A".to_string());
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled("Speed (kts):", Style::default().fg(Color::Cyan)),
+            Span::raw(format!(" {}", speed_knots)),
+        ]),
+        Line::from(vec![
+            Span::styled("Head Rate: ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!(" {}", heading_rate)),
+        ]),
+        Line::from(vec![
+            Span::styled("True Head: ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!(" {}", true_heading)),
+        ]),
+        Line::from(vec![
+            Span::styled("Accuracy:  ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!(" {}", accuracy)),
+        ]),
+    ];
+
+    Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("📊 Advanced Data"),
+    )
+}
+
+/// Create connection status widget
+pub fn create_connection_widget(state: &crate::models::AppState) -> Paragraph<'static> {
+    use crate::models::MqttStatus;
+
+    let mqtt_status = match state.mqtt_status {
+        MqttStatus::Connected => ("✓ Connected", Color::Green),
+        MqttStatus::Connecting => ("⟳ Connecting", Color::Yellow),
+        MqttStatus::Disconnected => ("✗ Disconnected", Color::Red),
+        MqttStatus::Error => ("✗ Error", Color::Red),
+    };
+
+    let serial_status = if state.serial_connected {
+        ("✓ Connected", Color::Green)
+    } else {
+        ("✗ Disconnected", Color::Red)
+    };
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled("MQTT:   ", Style::default().fg(Color::Cyan)),
+            Span::styled(mqtt_status.0, Style::default().fg(mqtt_status.1)),
+        ]),
+        Line::from(vec![
+            Span::styled("Serial: ", Style::default().fg(Color::Cyan)),
+            Span::styled(serial_status.0, Style::default().fg(serial_status.1)),
+        ]),
+    ];
+
+    Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("🔌 Connections"),
+    )
 }

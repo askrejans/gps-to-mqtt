@@ -131,9 +131,9 @@ impl TuiApp {
 
     /// Render header with tabs
     fn render_header(&self, f: &mut Frame, area: Rect) {
-        let titles = vec!["Overview (1)", "Satellites (2)", "Logs (3)"];
+        let titles = vec!["Overview (1)", "Satellites (2)", "Full Logs (3)"];
         let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::ALL).title("GPS to MQTT Monitor"))
+            .block(Block::default().borders(Borders::ALL).title("🛰️  GPS to MQTT Telemetry Monitor"))
             .select(self.selected_tab)
             .style(Style::default().fg(Color::White))
             .highlight_style(
@@ -146,26 +146,76 @@ impl TuiApp {
 
     /// Render overview tab
     fn render_overview(&self, f: &mut Frame, area: Rect, state: &AppState) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(10), // Position info
-                Constraint::Length(8),  // Fix info
-                Constraint::Min(0),     // Messages
-            ])
+        // Split into left (data) and right (logs) sections
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
 
-        // Position information
+        // Left side: GPS data widgets stacked vertically
+        let left_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(9),  // Position info
+                Constraint::Length(8),  // Fix info
+                Constraint::Length(7),  // Telemetry
+                Constraint::Min(0),     // Status/connection info
+            ])
+            .split(main_chunks[0]);
+
+        // Render left side widgets
         let position_widget = create_position_widget(&state.gps_data);
-        f.render_widget(position_widget, chunks[0]);
+        f.render_widget(position_widget, left_chunks[0]);
 
-        // Fix information
         let fix_widget = create_fix_widget(&state.gps_data);
-        f.render_widget(fix_widget, chunks[1]);
+        f.render_widget(fix_widget, left_chunks[1]);
 
-        // Recent messages
-        let messages_widget = create_messages_widget(&state.gps_data);
-        f.render_widget(messages_widget, chunks[2]);
+        let telemetry_widget = create_telemetry_widget(&state.gps_data);
+        f.render_widget(telemetry_widget, left_chunks[2]);
+
+        let connection_widget = create_connection_widget(state);
+        f.render_widget(connection_widget, left_chunks[3]);
+
+        // Right side: scrolling logs
+        self.render_log_panel(f, main_chunks[1], &state.gps_data.messages);
+    }
+
+    /// Render compact log panel
+    fn render_log_panel(&self, f: &mut Frame, area: Rect, messages: &[String]) {
+        let log_items: Vec<ListItem> = messages
+            .iter()
+            .rev() // Show newest first
+            .take(area.height.saturating_sub(2) as usize) // Account for borders
+            .map(|log| {
+                // Parse log level and colorize
+                let style = if log.contains("ERROR") || log.contains("Error") {
+                    Style::default().fg(Color::Red)
+                } else if log.contains("WARN") || log.contains("Warning") {
+                    Style::default().fg(Color::Yellow)
+                } else if log.contains("connected") || log.contains("Connected") {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                
+                // Truncate long messages to fit width
+                let max_width = area.width.saturating_sub(3) as usize;
+                let truncated = if log.len() > max_width {
+                    format!("{}...", &log[..max_width.saturating_sub(3)])
+                } else {
+                    log.clone()
+                };
+                
+                ListItem::new(truncated).style(style)
+            })
+            .collect();
+
+        let logs_widget = List::new(log_items)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title("Activity Log"));
+
+        f.render_widget(logs_widget, area);
     }
 
     /// Render satellites tab
