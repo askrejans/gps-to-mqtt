@@ -167,7 +167,7 @@ pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
         Span::styled("Sys", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
     ])));
 
-    // Group by system
+    // Group by system (already sorted)
     for (system, sats) in satellites_by_system.iter() {
         let system_color = match system {
             GnssSystem::Gps => Color::Green,
@@ -177,11 +177,8 @@ pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
             GnssSystem::Unknown => Color::Gray,
         };
 
-        // Sort satellites by PRN for stable display
-        let mut sorted_sats = sats.clone();
-        sorted_sats.sort_by_key(|s| s.prn);
-
-        for sat in sorted_sats.iter() {
+        // Satellites are already sorted by PRN in satellites_by_system
+        for sat in sats.iter() {
             let prn = format!("{:<4}", sat.prn);
             let el = sat
                 .elevation

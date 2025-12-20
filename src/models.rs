@@ -1,5 +1,5 @@
 use chrono::{NaiveDate, NaiveTime};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Represents the operational mode of the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +13,7 @@ pub enum AppMode {
 }
 
 /// GNSS system type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GnssSystem {
     Gps,
     Glonass,
@@ -124,11 +124,15 @@ impl GpsData {
         self.last_update = Some(std::time::Instant::now());
     }
 
-    /// Get satellites grouped by GNSS system
-    pub fn satellites_by_system(&self) -> HashMap<GnssSystem, Vec<&SatelliteInfo>> {
-        let mut result: HashMap<GnssSystem, Vec<&SatelliteInfo>> = HashMap::new();
+    /// Get satellites grouped by GNSS system (sorted by system)
+    pub fn satellites_by_system(&self) -> BTreeMap<GnssSystem, Vec<&SatelliteInfo>> {
+        let mut result: BTreeMap<GnssSystem, Vec<&SatelliteInfo>> = BTreeMap::new();
         for sat in self.satellites.values() {
             result.entry(sat.system).or_default().push(sat);
+        }
+        // Sort satellites within each system by PRN
+        for sats in result.values_mut() {
+            sats.sort_by_key(|s| s.prn);
         }
         result
     }

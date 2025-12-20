@@ -92,7 +92,7 @@ fn run_serial_loop(
 /// Open a serial port with the specified configuration
 fn open_serial_port(port_name: &str, baud_rate: u32) -> Result<Box<dyn SerialPort>> {
     let port = serialport::new(port_name, baud_rate)
-        .timeout(Duration::from_millis(100)) // Short timeout for responsive reading
+        .timeout(Duration::from_millis(500)) // Balanced timeout for stability
         .data_bits(serialport::DataBits::Eight)
         .parity(serialport::Parity::None)
         .stop_bits(serialport::StopBits::One)
