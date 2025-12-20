@@ -69,13 +69,14 @@ impl TuiApp {
                         KeyCode::Char('1') => self.selected_tab = 0,
                         KeyCode::Char('2') => self.selected_tab = 1,
                         KeyCode::Char('3') => self.selected_tab = 2,
+                        KeyCode::Char('4') => self.selected_tab = 3,
                         KeyCode::Left => {
                             if self.selected_tab > 0 {
                                 self.selected_tab -= 1;
                             }
                         }
                         KeyCode::Right => {
-                            if self.selected_tab < 2 {
+                            if self.selected_tab < 3 {
                                 self.selected_tab += 1;
                             }
                         }
@@ -121,6 +122,7 @@ impl TuiApp {
             0 => self.render_overview(f, chunks[1], state),
             1 => self.render_satellites(f, chunks[1], state),
             2 => self.render_full_logs(f, chunks[1]),
+            3 => self.render_raw_gps(f, chunks[1], state),
             _ => {}
         }
 
@@ -130,7 +132,7 @@ impl TuiApp {
 
     /// Render header with tabs
     fn render_header(&self, f: &mut Frame, area: Rect) {
-        let titles = vec!["Overview (1)", "Satellites (2)", "Full Logs (3)"];
+        let titles = vec!["Overview (1)", "Satellites (2)", "App Logs (3)", "Raw GPS (4)"];
         let tabs = Tabs::new(titles)
             .block(Block::default().borders(Borders::ALL).title("🛰️  GPS to MQTT Telemetry Monitor"))
             .select(self.selected_tab)
@@ -264,6 +266,35 @@ impl TuiApp {
             .block(Block::default().borders(Borders::ALL).title("Application Logs"));
 
         f.render_widget(logs_widget, area);
+    }
+
+    /// Render raw GPS NMEA data tab
+    fn render_raw_gps(&self, f: &mut Frame, area: Rect, state: &AppState) {
+        let raw_items: Vec<ListItem> = state.gps_data.raw_nmea_buffer
+            .iter()
+            .rev() // Show newest first
+            .take(area.height as usize - 2) // Account for borders
+            .map(|sentence| {
+                // Color code by sentence type
+                let style = if sentence.starts_with("$GPGGA") || sentence.starts_with("$GNGGA") {
+                    Style::default().fg(Color::Green) // Position
+                } else if sentence.starts_with("$GPGSV") || sentence.starts_with("$GLGSV") || sentence.starts_with("$GAGSV") {
+                    Style::default().fg(Color::Cyan) // Satellites
+                } else if sentence.starts_with("$GPRMC") || sentence.starts_with("$GNRMC") {
+                    Style::default().fg(Color::Yellow) // Recommended minimum
+                } else if sentence.starts_with("$GPGSA") || sentence.starts_with("$GNGSA") {
+                    Style::default().fg(Color::Magenta) // DOP and active satellites
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                ListItem::new(sentence.as_str()).style(style)
+            })
+            .collect();
+
+        let raw_widget = List::new(raw_items)
+            .block(Block::default().borders(Borders::ALL).title("📡 Raw GPS NMEA Data"));
+
+        f.render_widget(raw_widget, area);
     }
 
     /// Render status bar

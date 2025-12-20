@@ -177,7 +177,11 @@ pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
             GnssSystem::Unknown => Color::Gray,
         };
 
-        for sat in sats.iter() {
+        // Sort satellites by PRN for stable display
+        let mut sorted_sats = sats.clone();
+        sorted_sats.sort_by_key(|s| s.prn);
+
+        for sat in sorted_sats.iter() {
             let prn = format!("{:<4}", sat.prn);
             let el = sat
                 .elevation

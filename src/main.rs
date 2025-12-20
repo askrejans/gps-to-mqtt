@@ -254,6 +254,10 @@ async fn process_gps_events(
                 state_guard.gps_data.add_message(msg);
                 state_guard.serial_connected = true;
             }
+            GpsEvent::RawNmea(sentence) => {
+                state_guard.gps_data.add_raw_nmea(sentence);
+                state_guard.serial_connected = true;
+            }
             GpsEvent::AccuracyUpdate { std_lat, std_lon, std_alt: _ } => {
                 // Calculate overall position accuracy and store in navigation data
                 let position_accuracy = (std_lat * std_lat + std_lon * std_lon).sqrt();

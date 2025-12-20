@@ -10,6 +10,7 @@ pub enum GpsEvent {
     NavigationUpdate(NavigationData),
     FixUpdate(FixData),
     Message(String),
+    RawNmea(String), // Raw NMEA sentence for display
     #[allow(dead_code)]
     AccuracyUpdate { std_lat: f64, std_lon: f64, std_alt: f64 }, // From GST
     RateOfTurn(f64), // degrees/minute from ROT

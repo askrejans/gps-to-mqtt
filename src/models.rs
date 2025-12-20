@@ -92,6 +92,7 @@ pub struct GpsData {
     pub satellites: HashMap<u32, SatelliteInfo>,
     pub satellites_in_view: Option<u32>,
     pub messages: Vec<String>,
+    pub raw_nmea_buffer: Vec<String>,
     pub last_update: Option<std::time::Instant>,
 }
 
@@ -101,13 +102,20 @@ impl GpsData {
     }
 
     /// Add a text message to the message log
-    pub fn add_message(&mut self, message: String) {
-        self.messages.push(message);
-        // Keep only last 100 messages to prevent unbounded growth
+    pub fn add_message(&mut self, msg: String) {
+        self.messages.push(msg);
+        // Keep last 100 messages
         if self.messages.len() > 100 {
             self.messages.remove(0);
         }
-        self.last_update = Some(std::time::Instant::now());
+    }
+
+    pub fn add_raw_nmea(&mut self, sentence: String) {
+        self.raw_nmea_buffer.push(sentence);
+        // Keep last 500 raw NMEA sentences
+        if self.raw_nmea_buffer.len() > 500 {
+            self.raw_nmea_buffer.remove(0);
+        }
     }
 
     /// Update satellite information

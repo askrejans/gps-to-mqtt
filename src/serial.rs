@@ -57,12 +57,15 @@ fn run_serial_loop(
                 }
 
                 // Read from port
-                if let Err(e) = read_from_port(&mut port, &event_tx) {
-                    error!("Error reading from serial port: {}", e);
-                    consecutive_errors += 1;
-                } else {
-                    info!("Serial port closed gracefully");
-                    break;
+                match read_from_port(&mut port, &event_tx) {
+                    Ok(_) => {
+                        info!("Serial port closed gracefully");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Serial read error: {}", e);
+                        consecutive_errors += 1;
+                    }
                 }
             }
             Err(e) => {
@@ -89,7 +92,7 @@ fn run_serial_loop(
 /// Open a serial port with the specified configuration
 fn open_serial_port(port_name: &str, baud_rate: u32) -> Result<Box<dyn SerialPort>> {
     let port = serialport::new(port_name, baud_rate)
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_millis(100)) // Short timeout for responsive reading
         .data_bits(serialport::DataBits::Eight)
         .parity(serialport::Parity::None)
         .stop_bits(serialport::StopBits::One)
@@ -120,18 +123,36 @@ fn read_from_port(
     event_tx: &mpsc::Sender<GpsEvent>,
 ) -> Result<()> {
     let mut buffer = Vec::new();
-    let mut temp_buf = [0u8; 512];
+    let mut temp_buf = [0u8; 1024]; // Increased buffer size
+    let mut timeout_count = 0;
+    let mut sentences_received = 0;
+    let mut last_log_time = std::time::Instant::now();
+    const MAX_CONSECUTIVE_TIMEOUTS: u32 = 100; // Allow many timeouts before giving up
 
     loop {
-        // Read raw bytes instead of using BufReader with read_line
+        // Log statistics every 30 seconds
+        if last_log_time.elapsed() > Duration::from_secs(30) {
+            info!("Serial port stats: {} NMEA sentences received in last 30s", sentences_received);
+            sentences_received = 0;
+            last_log_time = std::time::Instant::now();
+        }
+
+        // Read raw bytes
         match port.read(&mut temp_buf) {
             Ok(0) => {
-                // EOF - this shouldn't happen with serial ports
-                warn!("Unexpected end of serial port stream");
-                std::thread::sleep(Duration::from_millis(100));
+                // No data available - this is normal, just wait a bit
+                std::thread::sleep(Duration::from_millis(10));
+                timeout_count += 1;
+                if timeout_count > MAX_CONSECUTIVE_TIMEOUTS {
+                    warn!("No data received for extended period");
+                    timeout_count = 0; // Reset but don't fail
+                }
                 continue;
             }
             Ok(n) => {
+                // Reset timeout counter on successful read
+                timeout_count = 0;
+                
                 // Append received bytes to buffer
                 buffer.extend_from_slice(&temp_buf[..n]);
                 
@@ -147,7 +168,15 @@ fn read_from_port(
                             
                             // Only process NMEA sentences
                             if trimmed.starts_with('$') && trimmed.contains('*') {
+                                sentences_received += 1;
                                 debug!("Received: {}", trimmed);
+                                
+                                // Send raw NMEA sentence first
+                                let raw_event = GpsEvent::RawNmea(trimmed.to_string());
+                                if let Err(e) = event_tx.blocking_send(raw_event) {
+                                    error!("Failed to send raw NMEA: {}", e);
+                                    return Err(anyhow::anyhow!("Event channel closed"));
+                                }
                                 
                                 // Parse the sentence
                                 match parse_nmea_sentence(trimmed) {
@@ -181,15 +210,25 @@ fn read_from_port(
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                // Timeout is normal, continue reading
+                // Timeout is normal with short timeout, just continue
+                timeout_count += 1;
+                if timeout_count > MAX_CONSECUTIVE_TIMEOUTS {
+                    debug!("Many consecutive timeouts, but continuing...");
+                    timeout_count = 0;
+                }
                 continue;
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                // Broken pipe might be recoverable
-                warn!("Broken pipe detected on serial port");
-                return Err(anyhow::anyhow!("Broken pipe"));
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Would block is like timeout - no data available
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                // Interrupted system call - retry
+                continue;
             }
             Err(e) => {
+                // Real error - return it
                 return Err(anyhow::anyhow!("Error reading from serial port: {}", e));
             }
         }
