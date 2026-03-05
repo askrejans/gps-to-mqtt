@@ -230,7 +230,8 @@ fn read_from_port(
 
                             // Only process fully-valid NMEA sentences (checksum guards
                             // against garbled data immediately after reconnect)
-                            if trimmed.starts_with('$') && trimmed.contains('*')
+                            if trimmed.starts_with('$')
+                                && trimmed.contains('*')
                                 && nmea_checksum_ok(trimmed)
                             {
                                 sentences_received += 1;

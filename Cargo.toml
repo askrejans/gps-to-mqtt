@@ -1,6 +1,6 @@
 [package]
 name = "gps-to-mqtt"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 authors = ["askrejans"]
 description = "GPS to MQTT bridge"

@@ -77,7 +77,12 @@ pub fn render_connections_widget(state: &AppState) -> Paragraph<'static> {
     if state.mqtt_enabled {
         lines.push(Line::from(vec![
             Span::styled("Msgs: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(state.messages_published.to_string()),
+            Span::raw(
+                state
+                    .messages_published
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .to_string(),
+            ),
         ]));
     }
 
@@ -328,8 +333,7 @@ pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
             let (bar, val_str, snr_col) = match sat.snr {
                 Some(s) => {
                     let filled = ((s.min(50).max(0) as usize) * 8) / 50;
-                    let bar_str =
-                        format!("{}{}", "█".repeat(filled), "░".repeat(8 - filled));
+                    let bar_str = format!("{}{}", "█".repeat(filled), "░".repeat(8 - filled));
                     let col = if s >= 40 {
                         Color::Green
                     } else if s >= 25 {
@@ -365,13 +369,33 @@ pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
         Style::default().fg(Color::DarkGray),
     ))));
     items.push(ListItem::new(Line::from(vec![
-        Span::styled(" G ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " G ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("GPS  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("R ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "R ",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Glonass  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("E ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "E ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Galileo  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("B ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "B ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("BeiDou", Style::default().fg(Color::DarkGray)),
     ])));
     items.push(ListItem::new(Line::from(vec![
@@ -415,10 +439,8 @@ pub fn create_satellite_sky_chart(
             use ratatui::widgets::canvas::{Circle, Points};
 
             // ── N/S and E/W axis guide lines ──────────────────────────────────
-            let ns: Vec<(f64, f64)> =
-                (-13..=13).map(|i| (0.0_f64, i as f64 * 0.1)).collect();
-            let ew: Vec<(f64, f64)> =
-                (-13..=13).map(|i| (i as f64 * 0.1, 0.0_f64)).collect();
+            let ns: Vec<(f64, f64)> = (-13..=13).map(|i| (0.0_f64, i as f64 * 0.1)).collect();
+            let ew: Vec<(f64, f64)> = (-13..=13).map(|i| (i as f64 * 0.1, 0.0_f64)).collect();
             ctx.draw(&Points {
                 coords: &ns,
                 color: Color::DarkGray,

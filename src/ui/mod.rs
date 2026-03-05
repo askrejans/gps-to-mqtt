@@ -60,7 +60,7 @@ struct StateSnapshot {
     connection_address: String,
     mqtt_address: String,
     gps_data: GpsData,
-    messages_published: u64,
+    messages_published: u64, // snapshot of AtomicU64
     logs: Vec<String>,
     selected_tab: usize,
 }
@@ -119,7 +119,7 @@ async fn tui_loop(
                     connection_address: s.connection_address.clone(),
                     mqtt_address: s.mqtt_address.clone(),
                     gps_data: s.gps_data.clone(),
-                    messages_published: s.messages_published,
+                    messages_published: s.messages_published.load(std::sync::atomic::Ordering::Relaxed),
                     logs,
                     selected_tab,
                 };
@@ -244,7 +244,9 @@ fn render_overview(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
         },
         connection_address: snap.connection_address.clone(),
         mqtt_address: snap.mqtt_address.clone(),
-        messages_published: snap.messages_published,
+        messages_published: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+            snap.messages_published,
+        )),
         gps_data: Default::default(),
     });
     f.render_widget(conn_widget, horiz[0]);

@@ -15,6 +15,7 @@ use gumdrop::Options;
 use logging::TuiWriter;
 use models::{AppState, GpsData, MqttStatus};
 use parser::GpsEvent;
+use std::sync::Arc as StdArc;
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -97,7 +98,8 @@ async fn main() -> Result<()> {
 
     // Start MQTT client (optional)
     if config.mqtt_enabled {
-        mqtt::spawn_mqtt_task(config.clone(), gps_data_rx, mqtt_status_tx).await?;
+        let msg_counter = StdArc::clone(&app_state.read().await.messages_published);
+        mqtt::spawn_mqtt_task(config.clone(), gps_data_rx, mqtt_status_tx, msg_counter).await?;
         info!("MQTT task started");
     } else {
         info!("MQTT disabled — running in display-only mode");
@@ -212,7 +214,8 @@ async fn process_gps_events(
                 state_guard.gps_data.last_update = Some(std::time::Instant::now());
                 state_guard.serial_connected = true;
             }
-            GpsEvent::RateOfTurn(_rate) => {
+            GpsEvent::RateOfTurn(rate) => {
+                state_guard.gps_data.navigation.heading_rate = Some(rate / 60.0); // deg/min → deg/s
                 state_guard.gps_data.last_update = Some(std::time::Instant::now());
                 state_guard.serial_connected = true;
             }

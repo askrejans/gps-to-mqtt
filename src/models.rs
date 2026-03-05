@@ -157,8 +157,9 @@ pub struct AppState {
     pub connection_address: String,
     /// Human-readable MQTT broker address (e.g. "localhost:1883")
     pub mqtt_address: String,
-    /// Total MQTT messages published since startup
-    pub messages_published: u64,
+    /// Shared atomic counter — incremented by the MQTT task on each publish.
+    /// Read by the TUI without taking a lock.
+    pub messages_published: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for AppState {
@@ -170,7 +171,7 @@ impl Default for AppState {
             mqtt_enabled: true,
             connection_address: String::new(),
             mqtt_address: String::new(),
-            messages_published: 0,
+            messages_published: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 }
@@ -178,13 +179,15 @@ impl Default for AppState {
 /// Telemetry metrics calculated from GPS data
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryMetrics {
-    pub longitudinal_accel: Option<f64>, // m/s² (positive = acceleration, negative = braking)
-    pub lateral_accel: Option<f64>,      // m/s² (lateral g-force)
-    pub combined_g: Option<f64>,         // Total g-force magnitude
-    pub heading_rate: Option<f64>,       // degrees/second
-    pub distance_traveled: f64,          // Total distance in meters
-    pub max_speed_kph: Option<f64>,      // Maximum speed recorded
-    pub is_braking: bool,                // True if braking detected
+    pub longitudinal_accel: Option<f64>, // m/s² (+accel / -braking)
+    pub longitudinal_g: Option<f64>,     // longitudinal_accel / 9.81
+    pub lateral_accel: Option<f64>,      // m/s² (centripetal, via v×ω)
+    pub lateral_g: Option<f64>,          // lateral_accel / 9.81
+    pub combined_g: Option<f64>,         // √(long_g² + lat_g²)
+    pub heading_rate: Option<f64>,       // degrees/second (yaw rate)
+    pub distance_traveled: f64,          // odometer, metres
+    pub max_speed_kph: Option<f64>,      // session maximum
+    pub is_braking: bool,                // long_accel < -0.5 m/s²
 }
 
 /// Lap timing data
@@ -356,7 +359,12 @@ mod tests {
         let state = AppState::default();
         assert!(!state.serial_connected);
         assert!(state.mqtt_enabled);
-        assert_eq!(state.messages_published, 0);
+        assert_eq!(
+            state
+                .messages_published
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
         assert_eq!(state.mqtt_status, MqttStatus::Disconnected);
         assert!(state.connection_address.is_empty());
         assert!(state.mqtt_address.is_empty());

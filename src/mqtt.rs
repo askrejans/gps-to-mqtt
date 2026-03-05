@@ -5,7 +5,10 @@ use crate::track::{LapDetector, parse_gpx_file};
 use anyhow::{Context, Result};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
@@ -171,6 +174,7 @@ pub async fn spawn_mqtt_task(
     config: AppConfig,
     mut gps_rx: mpsc::Receiver<GpsData>,
     status_tx: mpsc::Sender<MqttStatus>,
+    msg_counter: Arc<AtomicU64>,
 ) -> Result<()> {
     let client = MqttClient::new(config.clone())?;
     let publish_client = client.client.clone();
@@ -196,18 +200,33 @@ pub async fn spawn_mqtt_task(
     tokio::spawn(async move {
         while let Some(gps_data) = gps_rx.recv().await {
             // Publish standard GPS data
-            if let Err(e) =
-                publish_gps_data(&publish_client, &base_topic, &gps_data, &last_published).await
+            if let Err(e) = publish_gps_data(
+                &publish_client,
+                &base_topic,
+                &gps_data,
+                &last_published,
+                &msg_counter,
+            )
+            .await
             {
                 warn!("Failed to publish GPS data: {}", e);
             }
 
             // Calculate and publish telemetry metrics if enabled
             if let Some(ref mut calc) = telemetry_calc {
+                // Feed ROT into the calculator if available
+                if let Some(rot) = gps_data.navigation.heading_rate {
+                    calc.update_rate_of_turn(rot * 60.0); // deg/s → deg/min
+                }
                 let metrics = calc.update(&gps_data);
-                if let Err(e) =
-                    publish_telemetry_data(&publish_client, &base_topic, &metrics, &last_published)
-                        .await
+                if let Err(e) = publish_telemetry_data(
+                    &publish_client,
+                    &base_topic,
+                    &metrics,
+                    &last_published,
+                    &msg_counter,
+                )
+                .await
                 {
                     warn!("Failed to publish telemetry data: {}", e);
                 }
@@ -224,6 +243,7 @@ pub async fn spawn_mqtt_task(
                             &base_topic,
                             &lap_data,
                             &last_published,
+                            &msg_counter,
                         )
                         .await
                         {
@@ -320,16 +340,40 @@ async fn publish_gps_data(
     base_topic: &str,
     gps_data: &GpsData,
     last_published: &Arc<RwLock<HashMap<String, String>>>,
+    msg_counter: &Arc<AtomicU64>,
 ) -> Result<()> {
-    // Publish navigation data
     if let Some(lat) = gps_data.navigation.latitude {
-        publish_if_changed(client, base_topic, "/LAT", lat.to_string(), last_published).await?;
+        publish_if_changed(
+            client,
+            base_topic,
+            "/LAT",
+            lat.to_string(),
+            last_published,
+            msg_counter,
+        )
+        .await?;
     }
     if let Some(lon) = gps_data.navigation.longitude {
-        publish_if_changed(client, base_topic, "/LNG", lon.to_string(), last_published).await?;
+        publish_if_changed(
+            client,
+            base_topic,
+            "/LNG",
+            lon.to_string(),
+            last_published,
+            msg_counter,
+        )
+        .await?;
     }
     if let Some(alt) = gps_data.navigation.altitude {
-        publish_if_changed(client, base_topic, "/ALT", alt.to_string(), last_published).await?;
+        publish_if_changed(
+            client,
+            base_topic,
+            "/ALT",
+            alt.to_string(),
+            last_published,
+            msg_counter,
+        )
+        .await?;
     }
     if let Some(speed) = gps_data.navigation.speed_kph {
         publish_if_changed(
@@ -338,15 +382,16 @@ async fn publish_gps_data(
             "/SPD_KPH",
             speed.to_string(),
             last_published,
+            msg_counter,
         )
         .await?;
-        // Also publish as SPD for backwards compatibility
         publish_if_changed(
             client,
             base_topic,
             "/SPD",
             speed.to_string(),
             last_published,
+            msg_counter,
         )
         .await?;
     }
@@ -357,6 +402,7 @@ async fn publish_gps_data(
             "/SPD_KTS",
             speed_knots.to_string(),
             last_published,
+            msg_counter,
         )
         .await?;
     }
@@ -367,6 +413,7 @@ async fn publish_gps_data(
             "/CRS",
             course.to_string(),
             last_published,
+            msg_counter,
         )
         .await?;
     }
@@ -379,6 +426,7 @@ async fn publish_gps_data(
             "/SATS",
             sats.to_string(),
             last_published,
+            msg_counter,
         )
         .await?;
     }
@@ -389,6 +437,7 @@ async fn publish_gps_data(
             "/HDOP",
             hdop.to_string(),
             last_published,
+            msg_counter,
         )
         .await?;
     }
@@ -399,6 +448,7 @@ async fn publish_gps_data(
             "/VDOP",
             format!("{:.2}", vdop),
             last_published,
+            msg_counter,
         )
         .await?;
     }
@@ -409,17 +459,33 @@ async fn publish_gps_data(
             "/PDOP",
             format!("{:.2}", pdop),
             last_published,
+            msg_counter,
         )
         .await?;
     }
     if let Some(time) = gps_data.fix.time {
-        publish_if_changed(client, base_topic, "/TME", time.to_string(), last_published).await?;
+        publish_if_changed(
+            client,
+            base_topic,
+            "/TME",
+            time.to_string(),
+            last_published,
+            msg_counter,
+        )
+        .await?;
     }
     if let Some(date) = gps_data.fix.date {
-        publish_if_changed(client, base_topic, "/DTE", date.to_string(), last_published).await?;
+        publish_if_changed(
+            client,
+            base_topic,
+            "/DTE",
+            date.to_string(),
+            last_published,
+            msg_counter,
+        )
+        .await?;
     }
     if let Some(ref quality) = gps_data.fix.fix_quality {
-        // Convert FixQuality enum to number matching old behavior
         let quality_num = match quality {
             crate::models::FixQuality::Invalid => 0,
             crate::models::FixQuality::GpsFix => 1,
@@ -437,11 +503,11 @@ async fn publish_gps_data(
             "/QTY",
             quality_num.to_string(),
             last_published,
+            msg_counter,
         )
         .await?;
     }
 
-    // Publish total satellite count
     if let Some(count) = gps_data.satellites_in_view {
         publish_if_changed(
             client,
@@ -449,11 +515,10 @@ async fn publish_gps_data(
             "/SAT/GLOBAL/NUM",
             count.to_string(),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish position accuracy if available
     if let Some(accuracy) = gps_data.navigation.position_accuracy {
         publish_if_changed(
             client,
@@ -461,11 +526,10 @@ async fn publish_gps_data(
             "/POSITION_ACCURACY",
             format!("{:.2}", accuracy),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish true heading if available
     if let Some(heading) = gps_data.navigation.true_heading {
         publish_if_changed(
             client,
@@ -473,11 +537,10 @@ async fn publish_gps_data(
             "/TRUE_HEADING",
             format!("{:.1}", heading),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish heading rate if available
     if let Some(heading_rate) = gps_data.navigation.heading_rate {
         publish_if_changed(
             client,
@@ -485,15 +548,13 @@ async fn publish_gps_data(
             "/HEADING_RATE_GPS",
             format!("{:.2}", heading_rate),
             last_published,
+            msg_counter,
         )
         .await?;
     }
 
-    // Publish individual satellite data
     for (prn, sat) in &gps_data.satellites {
         let sat_topic = format!("/SAT/VEHICLES/{}", prn);
-
-        // Create satellite info string matching old format: "PRN: X, Type: Y, Elevation: Z, Azimuth: A, SNR: S, In View: true/false"
         let in_view = sat.snr.unwrap_or(0) > 0;
         let sat_info = format!(
             "PRN: {}, Type: {:?}, Elevation: {}, Azimuth: {}, SNR: {}, In View: {}",
@@ -510,8 +571,15 @@ async fn publish_gps_data(
                 .unwrap_or_else(|| "N/A".to_string()),
             in_view
         );
-
-        publish_if_changed(client, base_topic, &sat_topic, sat_info, last_published).await?;
+        publish_if_changed(
+            client,
+            base_topic,
+            &sat_topic,
+            sat_info,
+            last_published,
+            msg_counter,
+        )
+        .await?;
     }
 
     Ok(())
@@ -523,33 +591,52 @@ async fn publish_telemetry_data(
     base_topic: &str,
     metrics: &crate::models::TelemetryMetrics,
     last_published: &Arc<RwLock<HashMap<String, String>>>,
+    msg_counter: &Arc<AtomicU64>,
 ) -> Result<()> {
-    // Publish longitudinal acceleration
     if let Some(accel) = metrics.longitudinal_accel {
         publish_if_changed(
             client,
             base_topic,
-            "/ACCELERATION",
+            "/ACCEL_LONG_MPS2",
             format!("{:.3}", accel),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish lateral acceleration (g-forces)
-    if let Some(lateral) = metrics.lateral_accel {
-        let lateral_g = lateral / 9.81; // Convert m/s² to g
+    if let Some(g) = metrics.longitudinal_g {
         publish_if_changed(
             client,
             base_topic,
-            "/LATERAL_G",
-            format!("{:.3}", lateral_g),
+            "/ACCEL_LONG_G",
+            format!("{:.3}", g),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish combined g-force
+    if let Some(lat_accel) = metrics.lateral_accel {
+        publish_if_changed(
+            client,
+            base_topic,
+            "/ACCEL_LAT_MPS2",
+            format!("{:.3}", lat_accel),
+            last_published,
+            msg_counter,
+        )
+        .await?;
+    }
+    if let Some(g) = metrics.lateral_g {
+        publish_if_changed(
+            client,
+            base_topic,
+            "/ACCEL_LAT_G",
+            format!("{:.3}", g),
+            last_published,
+            msg_counter,
+        )
+        .await?;
+    }
     if let Some(combined) = metrics.combined_g {
         publish_if_changed(
             client,
@@ -557,11 +644,10 @@ async fn publish_telemetry_data(
             "/COMBINED_G",
             format!("{:.3}", combined),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish heading rate
     if let Some(heading_rate) = metrics.heading_rate {
         publish_if_changed(
             client,
@@ -569,21 +655,19 @@ async fn publish_telemetry_data(
             "/HEADING_RATE",
             format!("{:.2}", heading_rate),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish distance traveled
     publish_if_changed(
         client,
         base_topic,
         "/DISTANCE",
         format!("{:.1}", metrics.distance_traveled),
         last_published,
+        msg_counter,
     )
     .await?;
-
-    // Publish max speed
     if let Some(max_speed) = metrics.max_speed_kph {
         publish_if_changed(
             client,
@@ -591,17 +675,17 @@ async fn publish_telemetry_data(
             "/MAX_SPEED",
             format!("{:.1}", max_speed),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish braking status
     publish_if_changed(
         client,
         base_topic,
         "/BRAKING",
         if metrics.is_braking { "1" } else { "0" }.to_string(),
         last_published,
+        msg_counter,
     )
     .await?;
 
@@ -614,87 +698,82 @@ async fn publish_lap_data(
     base_topic: &str,
     lap_data: &crate::models::LapData,
     last_published: &Arc<RwLock<HashMap<String, String>>>,
+    msg_counter: &Arc<AtomicU64>,
 ) -> Result<()> {
-    // Publish lap number
     publish_if_changed(
         client,
         base_topic,
         "/LAP_NUMBER",
         lap_data.lap_number.to_string(),
         last_published,
+        msg_counter,
     )
     .await?;
-
-    // Publish current lap time
     if let Some(lap_time) = lap_data.lap_time_ms {
-        let lap_time_sec = lap_time as f64 / 1000.0;
         publish_if_changed(
             client,
             base_topic,
             "/LAP_TIME",
-            format!("{:.3}", lap_time_sec),
+            format!("{:.3}", lap_time as f64 / 1000.0),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish best lap time
     if let Some(best_lap) = lap_data.best_lap_ms {
-        let best_lap_sec = best_lap as f64 / 1000.0;
         publish_if_changed(
             client,
             base_topic,
             "/BEST_LAP",
-            format!("{:.3}", best_lap_sec),
+            format!("{:.3}", best_lap as f64 / 1000.0),
             last_published,
+            msg_counter,
         )
         .await?;
     }
-
-    // Publish sector times
     for (i, sector_time) in lap_data.sector_times_ms.iter().enumerate() {
         if let Some(time) = sector_time {
-            let sector_sec = *time as f64 / 1000.0;
             publish_if_changed(
                 client,
                 base_topic,
                 &format!("/SECTOR_{}", i + 1),
-                format!("{:.3}", sector_sec),
+                format!("{:.3}", *time as f64 / 1000.0),
                 last_published,
+                msg_counter,
             )
             .await?;
         }
     }
-
     Ok(())
 }
 
-/// Publish with change detection
+/// Publish if value changed; increment counter on actual publish.
 async fn publish_if_changed(
     client: &AsyncClient,
     base_topic: &str,
     subtopic: &str,
     payload: String,
     last_published: &Arc<RwLock<HashMap<String, String>>>,
+    msg_counter: &Arc<AtomicU64>,
 ) -> Result<()> {
     let full_topic = format!("{}{}", base_topic, subtopic);
 
-    // Check if value changed
     let mut last_values = last_published.write().await;
-    if let Some(last_value) = last_values.get(&full_topic) {
-        if last_value == &payload {
-            return Ok(());
-        }
+    if last_values
+        .get(&full_topic)
+        .map(|v| v == &payload)
+        .unwrap_or(false)
+    {
+        return Ok(());
     }
 
-    // Publish the message
     client
         .publish(&full_topic, QoS::AtMostOnce, true, payload.clone())
         .await
         .context("Failed to publish MQTT message")?;
 
-    // Update last published value
     last_values.insert(full_topic, payload);
+    msg_counter.fetch_add(1, Ordering::Relaxed);
 
     Ok(())
 }
