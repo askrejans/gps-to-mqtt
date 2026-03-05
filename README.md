@@ -4,6 +4,9 @@
 
 This Rust project serves as a bridge between GPS hardware and MQTT-based systems, enabling real-time GPS data integration into IoT and telemetry applications. It reads NMEA-0183 format data from USB GPS dongles, processes the various sentence types, and publishes parsed information to configurable MQTT topics.
 
+![gps](https://github.com/user-attachments/assets/14f42bc3-59a6-4973-99da-32b818c8b44e)
+
+
 ### Key Capabilities
 
 - **GPS Data Processing**: Reads and parses standard NMEA-0183 sentences including position, speed, course, and satellite information
@@ -278,32 +281,6 @@ Data is published to the following topics (with configurable base):
 - `{base_topic}/HEADING_RATE_GPS` - Heading rate from GPS (deg/s)
 
 All messages are published with QoS 0 and retained flag for last known values.
-
-## Pre-Built Packages
-
-There are also pre-built packages (may be outdated), that combine three individual components: [Speeduino-to-MQTT](https://github.com/askrejans/speeduino-to-mqtt), [GPS-to-MQTT](https://github.com/askrejans/gps-to-mqtt), and [G86 Web Dashboard](https://github.com/askrejans/G86-web-dashboard) in one system with predefined services.
-
-You can quickly get started by using pre-built packages available for both x64 and Raspberry Pi 4 (ARM) architectures:
-
-- **DEB Packages for x64:** [Download here](https://akelaops.com/repo/deb/pool/main/amd64/g86-car-telemetry_1.0.deb)
-- **DEB Packages for Raspberry Pi 4 (ARM):** [Download here](https://akelaops.com/repo/deb/pool/main/aarch64/g86-car-telemetry_1.0.deb)
-- **RPM Packages for x64:** [Download here](https://akelaops.com/repo/rpm/x86_64/g86-car-telemetry-1.0-1.x86_64.rpm)
-- **RPM Packages for Raspberry Pi 4 (ARM):** [Download here](https://akelaops.com/repo/rpm/aarch64/g86-car-telemetry-1.0-1.aarch64.rpm)
-
-### Package Installation Details
-
-- All packages install the three services in the directory `/opt/g86-car-telemetry` (or `/usr/opt/g86-car-telemetry`)
-- Configuration files for GPS and ECU processors can be found under `/etc/g86-car-telemetry` (or `/usr/etc/g86-car-telemetry`)
-- Web project configurations are located in `/var/www/g86-car-telemetry/config` (or `/usr/var/www/g86-car-telemetry/config`)
-- Ensure to add relevant configurations for MQTT server, TTY ports, and any extra settings
-
-### Installed Services
-
-The packages automatically install and manage the following services:
-
-- `g86-car-telemetry-gps`
-- `g86-car-telemetry-speeduino`
-- `g86-car-telemetry-web`
 
 ### Compatibility and Testing
 
