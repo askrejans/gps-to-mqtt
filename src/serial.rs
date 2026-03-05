@@ -5,6 +5,7 @@ use serialport::SerialPort;
 use std::io::Read;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -17,12 +18,18 @@ const UBX_10HZ_COMMAND: &[u8] = &[
 ];
 
 /// Spawn the serial port reading task
-pub async fn spawn_serial_task(config: AppConfig, event_tx: mpsc::Sender<GpsEvent>) -> Result<()> {
+pub async fn spawn_serial_task(
+    config: AppConfig,
+    event_tx: mpsc::Sender<GpsEvent>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let port_name = config.port_name.clone();
     let baud_rate = config.baud_rate;
     let set_10hz = config.set_gps_to_10hz;
 
-    tokio::task::spawn_blocking(move || run_serial_loop(&port_name, baud_rate, set_10hz, event_tx));
+    tokio::task::spawn_blocking(move || {
+        run_serial_loop(&port_name, baud_rate, set_10hz, event_tx, cancel)
+    });
 
     Ok(())
 }
@@ -33,10 +40,16 @@ fn run_serial_loop(
     baud_rate: u32,
     set_10hz: bool,
     event_tx: mpsc::Sender<GpsEvent>,
+    cancel: CancellationToken,
 ) {
     let mut consecutive_errors = 0;
 
     loop {
+        if cancel.is_cancelled() {
+            info!("Serial loop shutting down");
+            break;
+        }
+
         info!("Opening serial port: {} at {} baud", port_name, baud_rate);
 
         match open_serial_port(port_name, baud_rate) {
@@ -52,21 +65,33 @@ fn run_serial_loop(
                 }
 
                 // Read from port
-                match read_from_port(&mut port, &event_tx) {
+                match read_from_port(&mut port, &event_tx, &cancel) {
                     Ok(_) => {
                         info!("Serial port closed gracefully");
                         break;
                     }
                     Err(e) => {
+                        // Channel closed means the app is shutting down — don't reconnect
+                        if e.to_string().contains("channel closed") || cancel.is_cancelled() {
+                            info!("Serial loop exiting ({})", e);
+                            break;
+                        }
                         error!("Serial read error: {}", e);
                         consecutive_errors += 1;
                     }
                 }
             }
             Err(e) => {
+                if cancel.is_cancelled() {
+                    break;
+                }
                 error!("Failed to open serial port: {}", e);
                 consecutive_errors += 1;
             }
+        }
+
+        if cancel.is_cancelled() {
+            break;
         }
 
         // Determine reconnection delay based on error count
@@ -78,7 +103,14 @@ fn run_serial_loop(
         };
 
         warn!("Reconnecting in {:?}...", delay);
-        std::thread::sleep(delay);
+        // Sleep in short chunks so we can respond to cancellation promptly
+        let deadline = std::time::Instant::now() + delay;
+        while std::time::Instant::now() < deadline {
+            if cancel.is_cancelled() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
@@ -111,7 +143,11 @@ fn configure_10hz(port: &mut Box<dyn SerialPort>) -> Result<()> {
 }
 
 /// Read NMEA sentences from the serial port and send events
-fn read_from_port(port: &mut Box<dyn SerialPort>, event_tx: &mpsc::Sender<GpsEvent>) -> Result<()> {
+fn read_from_port(
+    port: &mut Box<dyn SerialPort>,
+    event_tx: &mpsc::Sender<GpsEvent>,
+    cancel: &CancellationToken,
+) -> Result<()> {
     let mut buffer = Vec::new();
     let mut temp_buf = [0u8; 1024]; // Increased buffer size
     let mut timeout_count = 0;
@@ -120,6 +156,11 @@ fn read_from_port(port: &mut Box<dyn SerialPort>, event_tx: &mpsc::Sender<GpsEve
     const MAX_CONSECUTIVE_TIMEOUTS: u32 = 100; // Allow many timeouts before giving up
 
     loop {
+        // Exit cleanly when cancelled
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+
         // Log statistics every 30 seconds
         if last_log_time.elapsed() > Duration::from_secs(30) {
             info!(
@@ -166,8 +207,7 @@ fn read_from_port(port: &mut Box<dyn SerialPort>, event_tx: &mpsc::Sender<GpsEve
 
                                 // Send raw NMEA sentence first
                                 let raw_event = GpsEvent::RawNmea(trimmed.to_string());
-                                if let Err(e) = event_tx.blocking_send(raw_event) {
-                                    error!("Failed to send raw NMEA: {}", e);
+                                if let Err(_) = event_tx.blocking_send(raw_event) {
                                     return Err(anyhow::anyhow!("Event channel closed"));
                                 }
 
@@ -175,9 +215,7 @@ fn read_from_port(port: &mut Box<dyn SerialPort>, event_tx: &mpsc::Sender<GpsEve
                                 match parse_nmea_sentence(trimmed) {
                                     Ok(events) => {
                                         for event in events {
-                                            // Send events to the processing task
-                                            if let Err(e) = event_tx.blocking_send(event) {
-                                                error!("Failed to send GPS event: {}", e);
+                                            if let Err(_) = event_tx.blocking_send(event) {
                                                 return Err(anyhow::anyhow!(
                                                     "Event channel closed"
                                                 ));
@@ -198,10 +236,14 @@ fn read_from_port(port: &mut Box<dyn SerialPort>, event_tx: &mpsc::Sender<GpsEve
                 }
 
                 // Keep buffer size reasonable - if it gets too large without finding a newline,
-                // something is wrong, so discard old data
-                if buffer.len() > 4096 {
-                    warn!("Serial buffer overflow, clearing");
-                    buffer.clear();
+                // seek to the next '$' to resync to an NMEA sentence boundary
+                if buffer.len() > 8192 {
+                    warn!("Serial buffer overflow, resyncing to next NMEA sentence");
+                    if let Some(next_start) = buffer.iter().position(|&b| b == b'$') {
+                        buffer.drain(..next_start);
+                    } else {
+                        buffer.clear();
+                    }
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {

@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
     }
 
     // Start serial port
-    serial::spawn_serial_task(config.clone(), gps_event_tx).await?;
+    serial::spawn_serial_task(config.clone(), gps_event_tx, cancel.clone()).await?;
     info!("Serial port task started");
 
     // Start MQTT client (optional)
