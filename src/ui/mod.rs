@@ -103,22 +103,40 @@ async fn tui_loop(
 ) -> Result<()> {
     let mut event_stream = EventStream::new();
     let mut render_tick = interval(Duration::from_millis(100));
+    // Satellites and sky-chart update at 1 Hz to stay human-readable at 10 Hz GPS rate
+    let mut sat_tick = interval(Duration::from_secs(1));
     let mut selected_tab: usize = 0;
+
+    // Cached satellite snapshot — only refreshed on sat_tick
+    let mut sat_cache: std::collections::HashMap<u32, crate::models::SatelliteInfo> =
+        std::collections::HashMap::new();
+    let mut sat_count_cache: Option<u32> = None;
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
 
+            // Refresh satellite cache at 1 Hz
+            _ = sat_tick.tick() => {
+                let s = state.read().await;
+                sat_cache = s.gps_data.satellites.clone();
+                sat_count_cache = s.gps_data.satellites_in_view;
+            }
+
             _ = render_tick.tick() => {
                 let s = state.read().await;
                 let logs: Vec<String> = log_buffer.lock().unwrap().iter().cloned().collect();
+                // Build GPS data with live navigation but throttled satellites
+                let mut gps_data = s.gps_data.clone();
+                gps_data.satellites = sat_cache.clone();
+                gps_data.satellites_in_view = sat_count_cache;
                 let snap = StateSnapshot {
                     serial_connected: s.serial_connected,
                     mqtt_connected: s.mqtt_status == MqttStatus::Connected,
                     mqtt_enabled: s.mqtt_enabled,
                     connection_address: s.connection_address.clone(),
                     mqtt_address: s.mqtt_address.clone(),
-                    gps_data: s.gps_data.clone(),
+                    gps_data,
                     messages_published: s.messages_published.load(std::sync::atomic::Ordering::Relaxed),
                     logs,
                     selected_tab,
