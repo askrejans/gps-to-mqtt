@@ -365,35 +365,13 @@ async fn publish_gps_data(
         .await?;
     }
     if let Some(alt) = gps_data.navigation.altitude {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/ALT",
-            alt.to_string(),
-            last_published,
-            msg_counter,
-        )
-        .await?;
+        publish_if_changed(client, base_topic, "/ALT", format!("{:.1}", alt), last_published, msg_counter).await?;
+        publish_if_changed(client, base_topic, "/ALT_FT", format!("{:.1}", alt * 3.28084), last_published, msg_counter).await?;
     }
     if let Some(speed) = gps_data.navigation.speed_kph {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/SPD_KPH",
-            speed.to_string(),
-            last_published,
-            msg_counter,
-        )
-        .await?;
-        publish_if_changed(
-            client,
-            base_topic,
-            "/SPD",
-            speed.to_string(),
-            last_published,
-            msg_counter,
-        )
-        .await?;
+        publish_if_changed(client, base_topic, "/SPD_KPH", format!("{:.1}", speed), last_published, msg_counter).await?;
+        publish_if_changed(client, base_topic, "/SPD_MPH", format!("{:.1}", speed * 0.621371), last_published, msg_counter).await?;
+        publish_if_changed(client, base_topic, "/SPD", format!("{:.1}", speed), last_published, msg_counter).await?;
     }
     if let Some(speed_knots) = gps_data.navigation.speed_knots {
         publish_if_changed(
@@ -406,16 +384,20 @@ async fn publish_gps_data(
         )
         .await?;
     }
-    if let Some(course) = gps_data.navigation.course {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/CRS",
-            course.to_string(),
-            last_published,
-            msg_counter,
-        )
-        .await?;
+    // Suppress course when stationary — it's GPS noise below ~3 km/h
+    let speed_kph = gps_data.navigation.speed_kph.unwrap_or(0.0);
+    if speed_kph >= 3.0 {
+        if let Some(course) = gps_data.navigation.course {
+            publish_if_changed(
+                client,
+                base_topic,
+                "/CRS",
+                course.to_string(),
+                last_published,
+                msg_counter,
+            )
+            .await?;
+        }
     }
 
     // Publish fix data
@@ -593,72 +575,21 @@ async fn publish_telemetry_data(
     last_published: &Arc<RwLock<HashMap<String, String>>>,
     msg_counter: &Arc<AtomicU64>,
 ) -> Result<()> {
-    if let Some(accel) = metrics.longitudinal_accel {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/ACCEL_LONG_MPS2",
-            format!("{:.3}", accel),
-            last_published,
-            msg_counter,
-        )
-        .await?;
-    }
-    if let Some(g) = metrics.longitudinal_g {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/ACCEL_LONG_G",
-            format!("{:.3}", g),
-            last_published,
-            msg_counter,
-        )
-        .await?;
-    }
-    if let Some(lat_accel) = metrics.lateral_accel {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/ACCEL_LAT_MPS2",
-            format!("{:.3}", lat_accel),
-            last_published,
-            msg_counter,
-        )
-        .await?;
-    }
-    if let Some(g) = metrics.lateral_g {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/ACCEL_LAT_G",
-            format!("{:.3}", g),
-            last_published,
-            msg_counter,
-        )
-        .await?;
-    }
-    if let Some(combined) = metrics.combined_g {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/COMBINED_G",
-            format!("{:.3}", combined),
-            last_published,
-            msg_counter,
-        )
-        .await?;
-    }
-    if let Some(heading_rate) = metrics.heading_rate {
-        publish_if_changed(
-            client,
-            base_topic,
-            "/HEADING_RATE",
-            format!("{:.2}", heading_rate),
-            last_published,
-            msg_counter,
-        )
-        .await?;
-    }
+    // Always publish derived values — use 0 when below speed threshold so
+    // subscribers always have a value and don't need to handle missing topics.
+    publish_if_changed(client, base_topic, "/ACCEL_LONG_MPS2",
+        format!("{:.3}", metrics.longitudinal_accel.unwrap_or(0.0)), last_published, msg_counter).await?;
+    publish_if_changed(client, base_topic, "/ACCEL_LONG_G",
+        format!("{:.3}", metrics.longitudinal_g.unwrap_or(0.0)), last_published, msg_counter).await?;
+    publish_if_changed(client, base_topic, "/ACCEL_LAT_MPS2",
+        format!("{:.3}", metrics.lateral_accel.unwrap_or(0.0)), last_published, msg_counter).await?;
+    publish_if_changed(client, base_topic, "/ACCEL_LAT_G",
+        format!("{:.3}", metrics.lateral_g.unwrap_or(0.0)), last_published, msg_counter).await?;
+    publish_if_changed(client, base_topic, "/COMBINED_G",
+        format!("{:.3}", metrics.combined_g.unwrap_or(0.0)), last_published, msg_counter).await?;
+    // Heading rate is noise below threshold — publish 0 when stopped
+    publish_if_changed(client, base_topic, "/HEADING_RATE",
+        format!("{:.2}", metrics.heading_rate.unwrap_or(0.0)), last_published, msg_counter).await?;
     publish_if_changed(
         client,
         base_topic,
@@ -674,6 +605,15 @@ async fn publish_telemetry_data(
             base_topic,
             "/MAX_SPEED",
             format!("{:.1}", max_speed),
+            last_published,
+            msg_counter,
+        )
+        .await?;
+        publish_if_changed(
+            client,
+            base_topic,
+            "/MAX_SPEED_MPH",
+            format!("{:.1}", max_speed * 0.621371),
             last_published,
             msg_counter,
         )

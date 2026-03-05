@@ -212,7 +212,7 @@ fn parse_rmc(sentence: &str) -> Result<Vec<GpsEvent>> {
     // Parse position and navigation
     let lat = parse_coordinate(parts[3], parts[4]).ok();
     let lon = parse_coordinate(parts[5], parts[6]).ok();
-    let speed = parts[7].parse().ok();
+    let speed = parts[7].parse::<f64>().ok();
     let course = parts[8].parse().ok();
 
     if lat.is_some() || lon.is_some() || speed.is_some() || course.is_some() {
@@ -220,6 +220,7 @@ fn parse_rmc(sentence: &str) -> Result<Vec<GpsEvent>> {
             latitude: lat,
             longitude: lon,
             speed_knots: speed,
+            speed_kph: speed.map(|kts| kts * 1.852),
             course,
             ..Default::default()
         };
