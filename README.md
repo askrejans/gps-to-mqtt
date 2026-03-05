@@ -306,12 +306,6 @@ Derived values are always published; zero is used when speed is below the 3 km/h
 | `/SECTOR_1`, `/SECTOR_2`, … | seconds | Individual sector times |
 
 
-### Compatibility and Testing
-
-These packages have been tested on both Raspberry Pi 4 (ARM) with DEB packages and x86 systems with RPM packages. However, please note that this project is a work in progress, and more tests are needed, especially with real ECUs. Exercise caution when using, and stay tuned for updates as development continues to enhance and stabilize the functionality.
-
-Feel free to reach out if you have any questions or encounter issues. Happy telemetry monitoring! 📊🛠️
-
 ## Architecture
 
 The application uses a modern async architecture built on tokio:
