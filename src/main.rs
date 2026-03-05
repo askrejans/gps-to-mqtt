@@ -142,6 +142,9 @@ async fn process_gps_events(
         let mut state_guard = state.write().await;
 
         match event {
+            GpsEvent::SatelliteClear(system) => {
+                state_guard.gps_data.satellites.retain(|_, s| s.system != system);
+            }
             GpsEvent::SatelliteUpdate(sat) => {
                 state_guard.gps_data.update_satellite(sat);
                 state_guard.serial_connected = true;

@@ -6,6 +6,8 @@ use tracing::debug;
 /// Events that can be generated from GPS data parsing
 #[derive(Debug, Clone)]
 pub enum GpsEvent {
+    /// Start of a new GSV cycle for a constellation — clear stale entries
+    SatelliteClear(GnssSystem),
     SatelliteUpdate(SatelliteInfo),
     NavigationUpdate(NavigationData),
     FixUpdate(FixData),
@@ -123,7 +125,13 @@ fn parse_gsv(sentence: &str) -> Result<Vec<GpsEvent>> {
         GnssSystem::Unknown
     };
 
+    // parts[2] = message number (1-based); on message 1 clear stale constellation data
+    let msg_num: u32 = parts[2].parse().unwrap_or(2);
+
     let mut events = Vec::new();
+    if msg_num == 1 {
+        events.push(GpsEvent::SatelliteClear(system));
+    }
 
     // Parse satellite information (4 fields per satellite)
     let mut i = 4;
@@ -705,7 +713,9 @@ mod tests {
     fn test_parse_gsv_gnss_system_gps() {
         let s = "$GPGSV,1,1,04,03,03,111,40*7F";
         let events = parse_nmea_sentence(s).unwrap();
-        if let GpsEvent::SatelliteUpdate(sat) = &events[0] {
+        // msg_num==1 → first event is SatelliteClear, second is SatelliteUpdate
+        assert!(matches!(&events[0], GpsEvent::SatelliteClear(crate::models::GnssSystem::Gps)));
+        if let GpsEvent::SatelliteUpdate(sat) = &events[1] {
             assert_eq!(sat.system, crate::models::GnssSystem::Gps);
             assert_eq!(sat.prn, 3);
         } else {
