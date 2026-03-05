@@ -116,11 +116,20 @@ async fn tui_loop(
         tokio::select! {
             _ = cancel.cancelled() => break,
 
-            // Refresh satellite cache at 1 Hz
+            // Refresh satellite cache at 1 Hz; drop entries not seen in the last 10 s
             _ = sat_tick.tick() => {
                 let s = state.read().await;
-                sat_cache = s.gps_data.satellites.clone();
-                sat_count_cache = s.gps_data.satellites_in_view;
+                let horizon = std::time::Duration::from_secs(10);
+                sat_cache = s.gps_data.satellites
+                    .iter()
+                    .filter(|(_, sat)| sat.last_seen.elapsed() < horizon)
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect();
+                sat_count_cache = if sat_cache.is_empty() {
+                    None
+                } else {
+                    Some(sat_cache.len() as u32)
+                };
             }
 
             _ = render_tick.tick() => {

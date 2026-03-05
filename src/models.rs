@@ -42,6 +42,22 @@ pub struct SatelliteInfo {
     pub azimuth: Option<i32>,
     pub snr: Option<i32>,
     pub system: GnssSystem,
+    /// Wall-clock time the satellite was last reported by the receiver.
+    /// Used to expire phantom entries without ever clearing mid-cycle.
+    pub last_seen: std::time::Instant,
+}
+
+impl Default for SatelliteInfo {
+    fn default() -> Self {
+        Self {
+            prn: 0,
+            elevation: None,
+            azimuth: None,
+            snr: None,
+            system: GnssSystem::Unknown,
+            last_seen: std::time::Instant::now(),
+        }
+    }
 }
 
 /// Position and navigation data
@@ -107,8 +123,9 @@ impl GpsData {
         }
     }
 
-    /// Update satellite information
-    pub fn update_satellite(&mut self, satellite: SatelliteInfo) {
+    /// Upsert a satellite, always refreshing last_seen to now.
+    pub fn update_satellite(&mut self, mut satellite: SatelliteInfo) {
+        satellite.last_seen = std::time::Instant::now();
         self.satellites.insert(satellite.prn, satellite);
         self.last_update = Some(std::time::Instant::now());
     }
@@ -283,6 +300,7 @@ mod tests {
             azimuth: Some(180),
             snr: Some(35),
             system: GnssSystem::Gps,
+            ..Default::default()
         };
         gps.update_satellite(sat);
         assert_eq!(gps.satellites.len(), 1);
@@ -299,6 +317,7 @@ mod tests {
             azimuth: None,
             snr: Some(20),
             system: GnssSystem::Gps,
+            ..Default::default()
         });
         gps.update_satellite(SatelliteInfo {
             prn: 1,
@@ -306,6 +325,7 @@ mod tests {
             azimuth: None,
             snr: Some(30),
             system: GnssSystem::Gps,
+            ..Default::default()
         });
         assert_eq!(gps.satellites.len(), 1);
         assert_eq!(gps.satellites[&1].snr, Some(30));
@@ -321,6 +341,7 @@ mod tests {
                 azimuth: None,
                 snr: None,
                 system: GnssSystem::Gps,
+                ..Default::default()
             });
         }
         gps.update_satellite(SatelliteInfo {
@@ -329,6 +350,7 @@ mod tests {
             azimuth: None,
             snr: None,
             system: GnssSystem::Glonass,
+            ..Default::default()
         });
         let by_system = gps.satellites_by_system();
         assert_eq!(by_system[&GnssSystem::Gps].len(), 3);
@@ -345,6 +367,7 @@ mod tests {
                 azimuth: None,
                 snr: None,
                 system: GnssSystem::Gps,
+                ..Default::default()
             });
         }
         let by_system = gps.satellites_by_system();
