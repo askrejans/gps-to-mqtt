@@ -227,99 +227,163 @@ pub fn render_gps_data_widget(gps_data: &GpsData) -> Paragraph<'static> {
 }
 
 // ---------------------------------------------------------------------------
-// Satellite widgets (preserved, lightly restyled)
+// Satellite widgets
 // ---------------------------------------------------------------------------
 
-/// Create satellite list widget
-pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
-    let satellites_by_system = gps_data.satellites_by_system();
-    let mut items = Vec::new();
+fn system_prefix_and_color(system: &GnssSystem) -> (&'static str, Color) {
+    match system {
+        GnssSystem::Gps => ("G", Color::Green),
+        GnssSystem::Glonass => ("R", Color::Blue),
+        GnssSystem::Galileo => ("E", Color::Cyan),
+        GnssSystem::Beidou => ("B", Color::Magenta),
+        GnssSystem::Unknown => ("?", Color::Gray),
+    }
+}
 
+/// Create satellite detail list (left panel of Satellites tab).
+pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
+    let by_sys = gps_data.satellites_by_system();
+    let total: usize = by_sys.values().map(|v| v.len()).sum();
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // ── Summary row ───────────────────────────────────────────────────────────
+    let mut summary_spans = vec![Span::styled(
+        format!("{} tracked  ", total),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for (sys, sats) in &by_sys {
+        let (pfx, col) = system_prefix_and_color(sys);
+        summary_spans.push(Span::styled(
+            format!("{}:{} ", pfx, sats.len()),
+            Style::default().fg(col).add_modifier(Modifier::BOLD),
+        ));
+    }
+    items.push(ListItem::new(Line::from(summary_spans)));
+
+    // ── Column header ─────────────────────────────────────────────────────────
+    items.push(ListItem::new(Line::from(Span::styled(
+        "─────────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    ))));
     items.push(ListItem::new(Line::from(vec![
         Span::styled(
-            "PRN  ",
+            " ID   ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "El   ",
+            " El  ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "Az   ",
+            "    Az  ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "SNR  ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "Sys",
+            "  Signal (dB)",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
     ])));
 
-    for (system, sats) in satellites_by_system.iter() {
-        let system_color = match system {
-            GnssSystem::Gps => Color::Green,
-            GnssSystem::Glonass => Color::Blue,
-            GnssSystem::Galileo => Color::Cyan,
-            GnssSystem::Beidou => Color::Magenta,
-            GnssSystem::Unknown => Color::Gray,
+    // ── Per-constellation groups ───────────────────────────────────────────────
+    for (system, sats) in by_sys.iter() {
+        let (pfx, sys_col) = system_prefix_and_color(system);
+        let sys_name = match system {
+            GnssSystem::Gps => "GPS",
+            GnssSystem::Glonass => "GLONASS",
+            GnssSystem::Galileo => "GALILEO",
+            GnssSystem::Beidou => "BEIDOU",
+            GnssSystem::Unknown => "OTHER",
         };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(
+                format!(" ▸ {} ", sys_name),
+                Style::default().fg(sys_col).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("({} sats)", sats.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])));
 
         for sat in sats.iter() {
-            let prn = format!("{:<5}", sat.prn);
-            let el = sat
+            let id = format!("{}{:02}", pfx, sat.prn % 100);
+            let el_str = sat
                 .elevation
-                .map(|e| format!("{:<5}", e))
-                .unwrap_or_else(|| "—    ".into());
-            let az = sat
+                .map(|e| format!("{:3}°", e))
+                .unwrap_or_else(|| "  — ".to_string());
+            let az_str = sat
                 .azimuth
-                .map(|a| format!("{:<5}", a))
-                .unwrap_or_else(|| "—    ".into());
-            let snr = sat
-                .snr
-                .map(|s| format!("{:<5}", s))
-                .unwrap_or_else(|| "—    ".into());
-            let snr_color = sat
-                .snr
-                .map(|s| {
-                    if s >= 40 {
+                .map(|a| format!("{:4}°", a))
+                .unwrap_or_else(|| "   — ".to_string());
+            let (bar, val_str, snr_col) = match sat.snr {
+                Some(s) => {
+                    let filled = ((s.min(50).max(0) as usize) * 8) / 50;
+                    let bar_str =
+                        format!("{}{}", "█".repeat(filled), "░".repeat(8 - filled));
+                    let col = if s >= 40 {
                         Color::Green
-                    } else if s >= 30 {
+                    } else if s >= 25 {
                         Color::Yellow
                     } else {
                         Color::Red
-                    }
-                })
-                .unwrap_or(Color::Gray);
-
+                    };
+                    (bar_str, format!("{:2}", s), col)
+                }
+                None => ("░░░░░░░░".to_string(), " —".to_string(), Color::DarkGray),
+            };
             items.push(ListItem::new(Line::from(vec![
-                Span::styled(prn, Style::default().fg(system_color)),
-                Span::raw(el),
-                Span::raw(az),
-                Span::styled(snr, Style::default().fg(snr_color)),
-                Span::styled(format!("{:?}", system), Style::default().fg(system_color)),
+                Span::styled(format!("  {:4}", id), Style::default().fg(sys_col)),
+                Span::styled(format!("  {} ", el_str), Style::default().fg(Color::White)),
+                Span::styled(format!("  {} ", az_str), Style::default().fg(Color::White)),
+                Span::styled(bar, Style::default().fg(snr_col)),
+                Span::styled(format!(" {}", val_str), Style::default().fg(snr_col)),
             ])));
         }
+        items.push(ListItem::new(Line::default())); // spacer between constellations
     }
 
-    if items.len() == 1 {
+    if total == 0 {
         items.push(ListItem::new(Line::from(Span::styled(
-            "No satellites in view",
+            "  Waiting for satellites...",
             Style::default().fg(Color::DarkGray),
         ))));
     }
+
+    // ── Legend ────────────────────────────────────────────────────────────────
+    items.push(ListItem::new(Line::from(Span::styled(
+        "─────────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    ))));
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(" G ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled("GPS  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("R ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+        Span::styled("Glonass  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("E ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled("Galileo  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("B ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled("BeiDou", Style::default().fg(Color::DarkGray)),
+    ])));
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(" ●", Style::default().fg(Color::Green)),
+        Span::styled(" ≥40 dB  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("●", Style::default().fg(Color::Yellow)),
+        Span::styled(" ≥25 dB  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("●", Style::default().fg(Color::Red)),
+        Span::styled(" <25 dB  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("●", Style::default().fg(Color::DarkGray)),
+        Span::styled(" no signal", Style::default().fg(Color::DarkGray)),
+    ])));
 
     List::new(items).block(
         Block::default()
@@ -328,82 +392,155 @@ pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
     )
 }
 
-/// Create satellite sky chart widget
+/// Create satellite sky chart (right panel of Satellites tab).
+///
+/// North is at the top, East to the right (standard sky-view orientation).
+/// Concentric rings mark 0° (horizon), 30°, and 60° elevation.
+/// Each satellite is plotted by its azimuth/elevation with its PRN label.
+/// Dot colour indicates signal quality; label colour indicates GNSS system.
 pub fn create_satellite_sky_chart(
     gps_data: &GpsData,
 ) -> Canvas<'static, impl Fn(&mut ratatui::widgets::canvas::Context) + 'static> {
-    let satellites = gps_data.satellites.clone();
+    let sats: Vec<_> = gps_data.satellites.values().cloned().collect();
 
     Canvas::default()
-        .block(Block::default().borders(Borders::ALL).title(" SKY VIEW "))
-        .x_bounds([-1.2, 1.2])
-        .y_bounds([-1.2, 1.2])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" SKY VIEW  (N↑  E→) "),
+        )
+        .x_bounds([-1.35, 1.35])
+        .y_bounds([-1.35, 1.35])
         .paint(move |ctx| {
             use ratatui::widgets::canvas::{Circle, Points};
 
-            // Draw elevation rings
-            for (radius, color) in &[
-                (0.0_f64, Color::DarkGray),
-                (0.33, Color::DarkGray),
-                (0.66, Color::DarkGray),
-                (1.0, Color::Gray),
+            // ── N/S and E/W axis guide lines ──────────────────────────────────
+            let ns: Vec<(f64, f64)> =
+                (-13..=13).map(|i| (0.0_f64, i as f64 * 0.1)).collect();
+            let ew: Vec<(f64, f64)> =
+                (-13..=13).map(|i| (i as f64 * 0.1, 0.0_f64)).collect();
+            ctx.draw(&Points {
+                coords: &ns,
+                color: Color::DarkGray,
+            });
+            ctx.draw(&Points {
+                coords: &ew,
+                color: Color::DarkGray,
+            });
+
+            // ── Elevation rings ───────────────────────────────────────────────
+            // r=1.0 → horizon (0°),  r=0.667 → 30°,  r=0.333 → 60°
+            for &(radius, step, label, ring_col) in &[
+                (1.000_f64, 3_usize, "0° ", Color::Gray),
+                (0.667_f64, 5_usize, "30°", Color::DarkGray),
+                (0.333_f64, 8_usize, "60°", Color::DarkGray),
             ] {
-                let pts: Vec<(f64, f64)> = (0..360)
-                    .step_by(5)
-                    .map(|angle| {
-                        let rad = (angle as f64) * PI / 180.0;
+                let pts: Vec<(f64, f64)> = (0..360_usize)
+                    .step_by(step)
+                    .map(|a| {
+                        let rad = a as f64 * PI / 180.0;
                         (radius * rad.cos(), radius * rad.sin())
                     })
                     .collect();
                 ctx.draw(&Points {
                     coords: &pts,
-                    color: *color,
+                    color: ring_col,
                 });
+                // Elevation label on the East side of each ring, just inside
+                ctx.print(
+                    radius - 0.03,
+                    0.09,
+                    Line::from(Span::styled(
+                        label.to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                );
             }
 
-            // Cardinal direction dots
-            for (x, y) in &[(0.0, 1.05), (0.0, -1.05), (1.05, 0.0), (-1.05, 0.0)] {
+            // Centre marker = zenith (90°)
+            ctx.draw(&Circle {
+                x: 0.0,
+                y: 0.0,
+                radius: 0.03,
+                color: Color::DarkGray,
+            });
+            ctx.print(
+                0.05,
+                0.07,
+                Line::from(Span::styled(
+                    "90°".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            );
+
+            // ── Cardinal direction labels ─────────────────────────────────────
+            for &(lx, ly, label) in &[
+                (0.0_f64, 1.12_f64, "N"),
+                (0.0_f64, -1.28_f64, "S"),
+                (1.12_f64, -0.04_f64, "E"),
+                (-1.28_f64, -0.04_f64, "W"),
+            ] {
+                ctx.print(
+                    lx,
+                    ly,
+                    Line::from(Span::styled(
+                        label.to_string(),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                );
+            }
+
+            // ── Satellite dots + PRN labels ───────────────────────────────────
+            for sat in &sats {
+                let (Some(el), Some(az)) = (sat.elevation, sat.azimuth) else {
+                    continue;
+                };
+
+                // Radial distance: 1.0 at horizon (el=0°), 0.0 at zenith (el=90°)
+                let r = 1.0 - (el as f64 / 90.0);
+
+                // North-up polar: az=0°→top, az=90°→right, az=180°→bottom, az=270°→left
+                let az_rad = (az as f64) * PI / 180.0;
+                let x = r * az_rad.sin();
+                let y = r * az_rad.cos();
+
+                let (pfx, sys_col) = match sat.system {
+                    GnssSystem::Gps => ("G", Color::Green),
+                    GnssSystem::Glonass => ("R", Color::Blue),
+                    GnssSystem::Galileo => ("E", Color::Cyan),
+                    GnssSystem::Beidou => ("B", Color::Magenta),
+                    GnssSystem::Unknown => ("?", Color::Gray),
+                };
+
+                // Dot colour: bright system colour if strong, yellow if ok, red if weak
+                let dot_col = match sat.snr {
+                    Some(s) if s >= 40 => sys_col,
+                    Some(s) if s >= 25 => Color::Yellow,
+                    Some(_) => Color::Red,
+                    None => Color::DarkGray,
+                };
+                let dot_r = if sat.snr.map(|s| s >= 35).unwrap_or(false) {
+                    0.05
+                } else {
+                    0.03
+                };
+
                 ctx.draw(&Circle {
-                    x: *x,
-                    y: *y,
-                    radius: 0.02,
-                    color: Color::White,
+                    x,
+                    y,
+                    radius: dot_r,
+                    color: dot_col,
                 });
-            }
 
-            // Plot satellites
-            for sat in satellites.values() {
-                if let (Some(elevation), Some(azimuth)) = (sat.elevation, sat.azimuth) {
-                    let radius = 1.0 - (elevation as f64 / 90.0);
-                    let azimuth_rad = (azimuth as f64 - 90.0) * PI / 180.0;
-                    let x = radius * azimuth_rad.cos();
-                    let y = radius * azimuth_rad.sin();
-                    let color = match sat.system {
-                        GnssSystem::Gps => Color::Green,
-                        GnssSystem::Glonass => Color::Blue,
-                        GnssSystem::Galileo => Color::Cyan,
-                        GnssSystem::Beidou => Color::Magenta,
-                        GnssSystem::Unknown => Color::Gray,
-                    };
-                    let r = sat
-                        .snr
-                        .map(|s| {
-                            if s >= 40 {
-                                0.05
-                            } else if s >= 30 {
-                                0.03
-                            } else {
-                                0.02
-                            }
-                        })
-                        .unwrap_or(0.01);
-                    ctx.draw(&Circle {
-                        x,
-                        y,
-                        radius: r,
-                        color,
-                    });
-                }
+                // PRN label offset just above-right of the dot
+                let label = format!("{}{:02}", pfx, sat.prn % 100);
+                ctx.print(
+                    x + 0.06,
+                    y + 0.04,
+                    Line::from(Span::styled(label, Style::default().fg(sys_col))),
+                );
             }
         })
 }

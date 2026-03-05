@@ -142,6 +142,23 @@ fn configure_10hz(port: &mut Box<dyn SerialPort>) -> Result<()> {
     Ok(())
 }
 
+/// Validate NMEA checksum: XOR of bytes between '$' and '*' must equal the two hex digits after '*'.
+fn nmea_checksum_ok(sentence: &str) -> bool {
+    let Some(star) = sentence.rfind('*') else {
+        return false;
+    };
+    let payload = &sentence[1..star]; // between '$' and '*'
+    let declared = &sentence[star + 1..];
+    if declared.len() < 2 {
+        return false;
+    }
+    let Ok(expected) = u8::from_str_radix(&declared[..2], 16) else {
+        return false;
+    };
+    let computed: u8 = payload.bytes().fold(0u8, |acc, b| acc ^ b);
+    computed == expected
+}
+
 /// Read NMEA sentences from the serial port and send events
 fn read_from_port(
     port: &mut Box<dyn SerialPort>,
@@ -149,11 +166,12 @@ fn read_from_port(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let mut buffer = Vec::new();
-    let mut temp_buf = [0u8; 1024]; // Increased buffer size
+    // 8 KB — large enough to drain the UART FIFO quickly at 115200 baud (≈11.5 KB/s)
+    let mut temp_buf = [0u8; 8192];
     let mut timeout_count = 0;
     let mut sentences_received = 0;
     let mut last_log_time = std::time::Instant::now();
-    const MAX_CONSECUTIVE_TIMEOUTS: u32 = 100; // Allow many timeouts before giving up
+    const MAX_CONSECUTIVE_TIMEOUTS: u32 = 100;
 
     loop {
         // Exit cleanly when cancelled
@@ -184,11 +202,21 @@ fn read_from_port(
                 continue;
             }
             Ok(n) => {
-                // Reset timeout counter on successful read
                 timeout_count = 0;
 
-                // Append received bytes to buffer
                 buffer.extend_from_slice(&temp_buf[..n]);
+
+                // Discard any leading bytes before the first '$' (binary UBX frames,
+                // partial sentences from reconnect, etc.) so they never accumulate.
+                if let Some(dollar) = buffer.iter().position(|&b| b == b'$') {
+                    if dollar > 0 {
+                        buffer.drain(..dollar);
+                    }
+                } else {
+                    // No NMEA start at all — toss everything and wait for next read
+                    buffer.clear();
+                    continue;
+                }
 
                 // Process complete lines from buffer
                 while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
@@ -200,8 +228,11 @@ fn read_from_port(
                         Ok(line) => {
                             let trimmed = line.trim();
 
-                            // Only process NMEA sentences
-                            if trimmed.starts_with('$') && trimmed.contains('*') {
+                            // Only process fully-valid NMEA sentences (checksum guards
+                            // against garbled data immediately after reconnect)
+                            if trimmed.starts_with('$') && trimmed.contains('*')
+                                && nmea_checksum_ok(trimmed)
+                            {
                                 sentences_received += 1;
                                 debug!("Received: {}", trimmed);
 
@@ -235,12 +266,14 @@ fn read_from_port(
                     }
                 }
 
-                // Keep buffer size reasonable - if it gets too large without finding a newline,
-                // seek to the next '$' to resync to an NMEA sentence boundary
-                if buffer.len() > 8192 {
+                // Safety net: a single NMEA sentence is never longer than 82 bytes
+                // (spec limit 80 + CRLF).  If the buffer somehow grew past 4 KB without
+                // a newline the stream is hopelessly out of sync — discard up to next '$'.
+                if buffer.len() > 4096 {
                     warn!("Serial buffer overflow, resyncing to next NMEA sentence");
-                    if let Some(next_start) = buffer.iter().position(|&b| b == b'$') {
-                        buffer.drain(..next_start);
+                    // skip the current '$' (index 0) and find the next one
+                    if let Some(next) = buffer[1..].iter().position(|&b| b == b'$') {
+                        buffer.drain(..next + 1);
                     } else {
                         buffer.clear();
                     }
