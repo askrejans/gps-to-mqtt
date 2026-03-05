@@ -142,10 +142,22 @@ async fn process_gps_events(
         let mut state_guard = state.write().await;
 
         match event {
-            GpsEvent::SatelliteClear(system) => {
-                state_guard.gps_data.satellites.retain(|_, s| s.system != system);
+            GpsEvent::SatelliteBatch(system, new_sats) => {
+                // Atomic replace: remove stale PRNs for this constellation, insert new ones.
+                // Called once per complete GSV cycle so there is no mid-cycle blank flash.
+                let new_prns: std::collections::HashSet<u32> =
+                    new_sats.iter().map(|s| s.prn).collect();
+                state_guard
+                    .gps_data
+                    .satellites
+                    .retain(|_, s| s.system != system || new_prns.contains(&s.prn));
+                for sat in new_sats {
+                    state_guard.gps_data.update_satellite(sat);
+                }
+                state_guard.serial_connected = true;
             }
             GpsEvent::SatelliteUpdate(sat) => {
+                // Intermediate GSV message (not the last in a cycle) — keep state warm.
                 state_guard.gps_data.update_satellite(sat);
                 state_guard.serial_connected = true;
             }

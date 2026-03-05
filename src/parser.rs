@@ -6,8 +6,9 @@ use tracing::debug;
 /// Events that can be generated from GPS data parsing
 #[derive(Debug, Clone)]
 pub enum GpsEvent {
-    /// Start of a new GSV cycle for a constellation — clear stale entries
-    SatelliteClear(GnssSystem),
+    /// Carries all satellites for one constellation once the full GSV cycle is received.
+    /// Replaces the previous clear+update pattern to avoid mid-cycle flickering.
+    SatelliteBatch(GnssSystem, Vec<SatelliteInfo>),
     SatelliteUpdate(SatelliteInfo),
     NavigationUpdate(NavigationData),
     FixUpdate(FixData),
@@ -125,29 +126,33 @@ fn parse_gsv(sentence: &str) -> Result<Vec<GpsEvent>> {
         GnssSystem::Unknown
     };
 
-    // parts[2] = message number (1-based); on message 1 clear stale constellation data
-    let msg_num: u32 = parts[2].parse().unwrap_or(2);
+    let total_msgs: u32 = parts[1].parse().unwrap_or(1);
+    let msg_num: u32 = parts[2].parse().unwrap_or(total_msgs);
 
-    let mut events = Vec::new();
-    if msg_num == 1 {
-        events.push(GpsEvent::SatelliteClear(system));
-    }
-
-    // Parse satellite information (4 fields per satellite)
+    // Collect satellite records from this message
+    let mut sats = Vec::new();
     let mut i = 4;
     while i + 3 < parts.len() {
         if let Ok(prn) = parts[i].parse::<u32>() {
-            let sat = SatelliteInfo {
+            sats.push(SatelliteInfo {
                 prn,
                 elevation: parts[i + 1].parse().ok(),
                 azimuth: parts[i + 2].parse().ok(),
                 snr: parts[i + 3].split('*').next().and_then(|s| s.parse().ok()),
                 system,
-            };
-            events.push(GpsEvent::SatelliteUpdate(sat));
+            });
         }
         i += 4;
     }
+
+    // On the last message of the cycle emit a complete batch — one atomic UI update.
+    // On intermediate messages just emit individual updates so the state stays populated.
+    let events = if msg_num == total_msgs {
+        // Last message: emit a batch so the handler can do a clean one-shot replace
+        vec![GpsEvent::SatelliteBatch(system, sats)]
+    } else {
+        sats.into_iter().map(GpsEvent::SatelliteUpdate).collect()
+    };
 
     Ok(events)
 }
@@ -700,26 +705,28 @@ mod tests {
 
     #[test]
     fn test_parse_gsv_produces_satellite_updates() {
+        // msg_num=1 of 3 → intermediate message → individual SatelliteUpdate events
         let s = "$GPGSV,3,1,11,03,03,111,00,04,15,270,00,06,01,010,00,13,06,292,00*74";
         let events = parse_nmea_sentence(s).unwrap();
         let sat_count = events
             .iter()
             .filter(|e| matches!(e, GpsEvent::SatelliteUpdate(_)))
             .count();
-        assert!(sat_count > 0);
+        assert!(sat_count > 0, "intermediate GSV message should emit SatelliteUpdate events");
     }
 
     #[test]
     fn test_parse_gsv_gnss_system_gps() {
+        // total_msgs=1, msg_num=1 → last message → emits SatelliteBatch
         let s = "$GPGSV,1,1,04,03,03,111,40*7F";
         let events = parse_nmea_sentence(s).unwrap();
-        // msg_num==1 → first event is SatelliteClear, second is SatelliteUpdate
-        assert!(matches!(&events[0], GpsEvent::SatelliteClear(crate::models::GnssSystem::Gps)));
-        if let GpsEvent::SatelliteUpdate(sat) = &events[1] {
-            assert_eq!(sat.system, crate::models::GnssSystem::Gps);
-            assert_eq!(sat.prn, 3);
+        assert_eq!(events.len(), 1, "single-message cycle should emit one SatelliteBatch");
+        if let GpsEvent::SatelliteBatch(system, sats) = &events[0] {
+            assert_eq!(*system, crate::models::GnssSystem::Gps);
+            assert_eq!(sats[0].prn, 3);
+            assert_eq!(sats[0].system, crate::models::GnssSystem::Gps);
         } else {
-            panic!("expected SatelliteUpdate");
+            panic!("expected SatelliteBatch");
         }
     }
 
