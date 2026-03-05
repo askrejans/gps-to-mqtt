@@ -8,8 +8,8 @@ Wants=network-online.target
 Type=simple
 User=gps
 Group=gps
-WorkingDirectory=/opt/gps-to-mqtt
-ExecStart=/opt/gps-to-mqtt/gps-to-mqtt --mode service --config /etc/g86-car-telemetry/gps-to-mqtt.toml
+WorkingDirectory=/
+ExecStart=/usr/bin/gps-to-mqtt --config /etc/gps-to-mqtt/settings.toml
 
 # Restart configuration
 Restart=always
@@ -22,7 +22,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/gps-to-mqtt
+
+# Optional environment variable overrides (uncomment and adjust as needed):
+# Environment=GPS_TO_MQTT_MQTT_HOST=localhost
+# Environment=GPS_TO_MQTT_MQTT_PORT=1883
+# Environment=GPS_TO_MQTT_LOG_LEVEL=info
 
 # Resource limits
 LimitNOFILE=65536

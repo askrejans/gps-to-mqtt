@@ -1,204 +1,98 @@
+//! Logging infrastructure.
+//!
+//! Two modes:
+//! - **TUI mode** — log lines captured into a shared ring-buffer via `TuiWriter`;
+//!   the bottom log panel of the TUI renders the buffer in real time.
+//! - **Service mode** — human-readable (pretty) or JSON structured output to
+//!   stdout (journald / log aggregation friendly).
+
 use crate::config::AppConfig;
-use crate::models::AppMode;
-use anyhow::Result;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::Level;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use std::{
+    collections::VecDeque,
+    io::{self, Write},
+    sync::{Arc, Mutex},
+};
+use tracing_subscriber::EnvFilter;
 
-/// Initialize logging based on the application mode
-pub fn init_logging(config: &AppConfig) -> Result<()> {
-    init_logging_with_buffer(config, None)
+// ---------------------------------------------------------------------------
+// TUI log writer
+// ---------------------------------------------------------------------------
+
+/// An `io::Write` implementation that appends formatted log lines to a shared
+/// ring-buffer, which the TUI renders in the bottom log panel.
+#[derive(Clone)]
+pub struct TuiWriter {
+    buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
-/// Initialize logging with optional buffer for TUI mode
-pub fn init_logging_with_buffer(
-    config: &AppConfig,
-    log_buffer: Option<Arc<RwLock<Vec<String>>>>,
-) -> Result<()> {
-    let log_level = parse_log_level(&config.log_level);
-
-    match config.mode {
-        AppMode::Tui => init_tui_logging(log_level, log_buffer),
-        AppMode::Cli => init_cli_logging(log_level),
-        AppMode::Service => init_service_logging(config, log_level),
-    }
-}
-
-/// Parse log level string to tracing Level
-fn parse_log_level(level: &str) -> Level {
-    match level.to_lowercase().as_str() {
-        "trace" => Level::TRACE,
-        "debug" => Level::DEBUG,
-        "info" => Level::INFO,
-        "warn" => Level::WARN,
-        "error" => Level::ERROR,
-        _ => Level::INFO,
-    }
-}
-
-/// Initialize logging for TUI mode - capture logs to buffer without printing to stdout
-fn init_tui_logging(
-    log_level: Level,
-    log_buffer: Option<Arc<RwLock<Vec<String>>>>,
-) -> Result<()> {
-    let filter = EnvFilter::from_default_env()
-        .add_directive(log_level.into())
-        .add_directive("rumqttc=warn".parse()?)
-        .add_directive("tokio=warn".parse()?)
-        .add_directive("gps_to_mqtt=info".parse()?);
-
-    if let Some(buffer) = log_buffer {
-        // Use custom layer that captures to buffer
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(LogBufferLayer::new(buffer))
-            .init();
-    } else {
-        // Fallback to null output (shouldn't happen)
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(
-                fmt::layer()
-                    .with_writer(std::io::sink)
-                    .compact()
-                    .with_target(false)
-                    .with_thread_ids(false)
-                    .with_file(false)
-                    .with_line_number(false),
-            )
-            .init();
-    }
-
-    Ok(())
-}
-
-/// Initialize logging for CLI mode - human-readable console output
-fn init_cli_logging(log_level: Level) -> Result<()> {
-    let filter = EnvFilter::from_default_env()
-        .add_directive(log_level.into())
-        .add_directive("rumqttc=warn".parse()?)
-        .add_directive("tokio=warn".parse()?)
-        .add_directive("gps_to_mqtt=info".parse()?);
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            fmt::layer()
-                .compact()
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_file(false)
-                .with_line_number(false),
-        )
-        .init();
-
-    Ok(())
-}
-
-/// Initialize logging for service mode - structured logging to file/journald
-fn init_service_logging(config: &AppConfig, log_level: Level) -> Result<()> {
-    let filter = EnvFilter::from_default_env()
-        .add_directive(log_level.into())
-        .add_directive("gps_to_mqtt=trace".parse()?);
-
-    if let Some(log_path) = &config.log_file_path {
-        // Log to file with rotation
-        let file_appender = tracing_appender::rolling::daily(
-            std::path::Path::new(log_path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("/var/log")),
-            std::path::Path::new(log_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("gps-to-mqtt.log"),
-        );
-
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(
-                fmt::layer()
-                    .json()
-                    .with_writer(file_appender)
-                    .with_current_span(true)
-                    .with_span_list(false),
-            )
-            .init();
-    } else {
-        // Log to stdout in JSON format (for journald)
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(
-                fmt::layer()
-                    .json()
-                    .with_current_span(true)
-                    .with_span_list(false),
-            )
-            .init();
-    }
-
-    Ok(())
-}
-
-/// Custom tracing layer that captures log messages to a buffer
-struct LogBufferLayer {
-    buffer: Arc<RwLock<Vec<String>>>,
-}
-
-impl LogBufferLayer {
-    fn new(buffer: Arc<RwLock<Vec<String>>>) -> Self {
+impl TuiWriter {
+    pub fn new(buffer: Arc<Mutex<VecDeque<String>>>) -> Self {
         Self { buffer }
     }
 }
 
-impl<S> Layer<S> for LogBufferLayer
-where
-    S: tracing::Subscriber,
-{
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let metadata = event.metadata();
-        let mut message = String::new();
-        
-        // Format: LEVEL message
-        let level = metadata.level();
-        message.push_str(&format!("{:5} ", level));
-        
-        // Visit fields to extract message
-        let mut visitor = MessageVisitor { message: String::new() };
-        event.record(&mut visitor);
-        message.push_str(&visitor.message);
-        
-        // Store in buffer (limit to last 1000 lines)
-        if let Ok(mut log_buffer) = self.buffer.try_write() {
-            log_buffer.push(message);
-            if log_buffer.len() > 1000 {
-                log_buffer.drain(0..100);
+impl Write for TuiWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Ok(s) = std::str::from_utf8(buf) {
+            let trimmed = s.trim_end_matches('\n');
+            if !trimmed.is_empty() {
+                let mut guard = self.buffer.lock().unwrap();
+                if guard.len() >= 500 {
+                    guard.pop_front();
+                }
+                guard.push_back(trimmed.to_string());
             }
         }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
-struct MessageVisitor {
-    message: String,
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TuiWriter {
+    type Writer = TuiWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
 }
 
-impl tracing::field::Visit for MessageVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.message = format!("{:?}", value);
-            // Remove surrounding quotes from debug output
-            if self.message.starts_with('"') && self.message.ends_with('"') {
-                self.message = self.message[1..self.message.len()-1].to_string();
-            }
-        } else {
-            if !self.message.is_empty() {
-                self.message.push_str(", ");
-            }
-            self.message.push_str(&format!("{}: {:?}", field.name(), value));
-        }
+// ---------------------------------------------------------------------------
+// Logging initializers
+// ---------------------------------------------------------------------------
+
+/// Initialize logging for service / daemon mode.
+///
+/// Writes to stdout — pretty text or JSON depending on `config.log_json`.
+pub fn init_logging_service(config: &AppConfig) {
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+
+    if config.log_json {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .init();
     }
+}
+
+/// Initialize logging for interactive TUI mode.
+///
+/// All log output is captured by `writer` and fed into the on-screen log panel;
+/// nothing is written to stdout so the terminal display stays clean.
+pub fn init_logging_tui(config: &AppConfig, writer: TuiWriter) {
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(writer)
+        .init();
 }

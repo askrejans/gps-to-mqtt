@@ -1,341 +1,347 @@
+//! Terminal User Interface
+//!
+//! Renders a live four-tab dashboard when the application is run interactively
+//! (TTY detected).  In service / daemon mode the TUI is skipped and structured
+//! logs are written to stdout.
+//!
+//! # Layout
+//! ```text
+//! ┌─────────────────── GPS-to-MQTT vX.Y ─ press q to quit ──────────────────┐
+//! │ Overview(1) │ Satellites(2) │ Logs(3) │ Raw GPS(4)                       │
+//! ├───────────────────────────────────────────────────────────────────────────┤
+//! │ CONNECTIONS         │ GPS DATA (tab content)                              │
+//! │ GPS: ● ONLINE       │ ── POSITION ──                                      │
+//! │  /dev/ttyUSB0       │  Latitude  …                                        │
+//! │ MQTT: ● ONLINE      │                                                     │
+//! │  localhost:1883     │                                                     │
+//! ├───────────────────────────────────────────────────────────────────────────┤
+//! │ LOG (most recent)                                                          │
+//! └───────────────────────────────────────────────────────────────────────────┘
+//! ```
+
 mod widgets;
 
-use crate::config::AppConfig;
-use crate::models::{AppState, MqttStatus};
+use crate::models::{AppState, GpsData, MqttStatus};
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use futures_util::StreamExt;
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
-    Frame, Terminal,
 };
-use std::io;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    io,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::sync::RwLock;
-use tracing::info;
+use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 
 pub use widgets::*;
 
-/// TUI Application state
-pub struct TuiApp {
-    state: Arc<RwLock<AppState>>,
-    log_buffer: Arc<RwLock<Vec<String>>>,
+// ---------------------------------------------------------------------------
+// State snapshot for render pass
+// ---------------------------------------------------------------------------
+
+struct StateSnapshot {
+    serial_connected: bool,
+    mqtt_connected: bool,
+    mqtt_enabled: bool,
+    connection_address: String,
+    mqtt_address: String,
+    gps_data: GpsData,
+    messages_published: u64,
+    logs: Vec<String>,
     selected_tab: usize,
-    should_quit: bool,
 }
 
-impl TuiApp {
-    pub fn new(state: Arc<RwLock<AppState>>, log_buffer: Arc<RwLock<Vec<String>>>) -> Self {
-        Self {
-            state,
-            log_buffer,
-            selected_tab: 0,
-            should_quit: false,
-        }
-    }
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
-    /// Run the TUI application
-    pub async fn run(mut self, config: AppConfig) -> Result<()> {
-        // Setup terminal
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
+/// Run the interactive TUI until `q` / Ctrl+C is pressed or `cancel` fires.
+pub async fn run_tui(
+    state: Arc<RwLock<AppState>>,
+    log_buffer: Arc<Mutex<VecDeque<String>>>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
-        let refresh_rate = Duration::from_millis(config.tui_refresh_rate_ms);
+    let result = tui_loop(&mut terminal, state, log_buffer, cancel).await;
 
-        // Main loop
-        loop {
-            let state = self.state.read().await.clone();
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
 
-            terminal.draw(|f| self.draw(f, &state))?;
+    result
+}
 
-            // Handle events with timeout
-            if event::poll(refresh_rate)? {
-                if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            self.should_quit = true;
-                        }
-                        KeyCode::Char('1') => self.selected_tab = 0,
-                        KeyCode::Char('2') => self.selected_tab = 1,
-                        KeyCode::Char('3') => self.selected_tab = 2,
-                        KeyCode::Char('4') => self.selected_tab = 3,
-                        KeyCode::Left => {
-                            if self.selected_tab > 0 {
-                                self.selected_tab -= 1;
-                            }
-                        }
-                        KeyCode::Right => {
-                            if self.selected_tab < 3 {
-                                self.selected_tab += 1;
-                            }
-                        }
-                        _ => {}
+// ---------------------------------------------------------------------------
+// Internal loop
+// ---------------------------------------------------------------------------
+
+async fn tui_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: Arc<RwLock<AppState>>,
+    log_buffer: Arc<Mutex<VecDeque<String>>>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let mut event_stream = EventStream::new();
+    let mut render_tick = interval(Duration::from_millis(100));
+    let mut selected_tab: usize = 0;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+
+            _ = render_tick.tick() => {
+                let s = state.read().await;
+                let logs: Vec<String> = log_buffer.lock().unwrap().iter().cloned().collect();
+                let snap = StateSnapshot {
+                    serial_connected: s.serial_connected,
+                    mqtt_connected: s.mqtt_status == MqttStatus::Connected,
+                    mqtt_enabled: s.mqtt_enabled,
+                    connection_address: s.connection_address.clone(),
+                    mqtt_address: s.mqtt_address.clone(),
+                    gps_data: s.gps_data.clone(),
+                    messages_published: s.messages_published,
+                    logs,
+                    selected_tab,
+                };
+                drop(s);
+                terminal.draw(|f| render(f, &snap))?;
+            }
+
+            Some(Ok(event)) = event_stream.next() => {
+                match event {
+                    Event::Key(k) if k.code == KeyCode::Char('q')
+                        || (k.code == KeyCode::Char('c')
+                            && k.modifiers.contains(KeyModifiers::CONTROL)) =>
+                    {
+                        cancel.cancel();
+                        break;
                     }
+                    Event::Key(k) => match k.code {
+                        KeyCode::Char('1') => selected_tab = 0,
+                        KeyCode::Char('2') => selected_tab = 1,
+                        KeyCode::Char('3') => selected_tab = 2,
+                        KeyCode::Char('4') => selected_tab = 3,
+                        KeyCode::Left if selected_tab > 0 => selected_tab -= 1,
+                        KeyCode::Right if selected_tab < 3 => selected_tab += 1,
+                        _ => {}
+                    },
+                    _ => {}
                 }
             }
-
-            if self.should_quit {
-                break;
-            }
         }
-
-        // Restore terminal
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        terminal.show_cursor()?;
-
-        info!("TUI application exited");
-        Ok(())
     }
+    Ok(())
+}
 
-    /// Draw the UI
-    fn draw(&self, f: &mut Frame, state: &AppState) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),  // Header with tabs
-                Constraint::Min(0),     // Main content
-                Constraint::Length(3),  // Status bar
-            ])
-            .split(f.area());
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
 
-        // Render header with tabs
-        self.render_header(f, chunks[0]);
+fn render(f: &mut Frame, snap: &StateSnapshot) {
+    let area = f.area();
 
-        // Render content based on selected tab
-        match self.selected_tab {
-            0 => self.render_overview(f, chunks[1], state),
-            1 => self.render_satellites(f, chunks[1], state),
-            2 => self.render_full_logs(f, chunks[1]),
-            3 => self.render_raw_gps(f, chunks[1], state),
-            _ => {}
-        }
+    // Vertical: header(3) | tabs(1) | main(min) | log(8)
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(8),
+            Constraint::Length(8),
+        ])
+        .split(area);
 
-        // Render status bar
-        self.render_status_bar(f, chunks[2], state);
+    render_header(f, vertical[0]);
+    render_tabs(f, vertical[1], snap.selected_tab);
+    render_main(f, vertical[2], snap);
+    render_log(f, vertical[3], snap);
+}
+
+fn render_header(f: &mut Frame, area: Rect) {
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(
+            concat!(" GPS-to-MQTT v", env!("CARGO_PKG_VERSION"), " "),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" │ press "),
+        Span::styled(
+            "q",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" to quit"),
+    ]))
+    .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title, area);
+}
+
+fn render_tabs(f: &mut Frame, area: Rect, selected: usize) {
+    let tabs = Tabs::new(vec![
+        "Overview (1)",
+        "Satellites (2)",
+        "App Logs (3)",
+        "Raw GPS (4)",
+    ])
+    .select(selected)
+    .style(Style::default().fg(Color::White))
+    .highlight_style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+    f.render_widget(tabs, area);
+}
+
+fn render_main(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
+    match snap.selected_tab {
+        0 => render_overview(f, area, snap),
+        1 => render_satellites(f, area, snap),
+        2 => render_full_logs(f, area, snap),
+        3 => render_raw_gps(f, area, snap),
+        _ => {}
     }
+}
 
-    /// Render header with tabs
-    fn render_header(&self, f: &mut Frame, area: Rect) {
-        let titles = vec!["Overview (1)", "Satellites (2)", "App Logs (3)", "Raw GPS (4)"];
-        let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::ALL).title("🛰️  GPS to MQTT Telemetry Monitor"))
-            .select(self.selected_tab)
-            .style(Style::default().fg(Color::White))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
-        f.render_widget(tabs, area);
-    }
+// ── Tab 1: Overview ──────────────────────────────────────────────────────────
 
-    /// Render overview tab
-    fn render_overview(&self, f: &mut Frame, area: Rect, state: &AppState) {
-        // Split into left (data) and right (logs) sections
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(area);
+fn render_overview(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
+    // Left: connections panel (28 cols fixed); Right: GPS data
+    let horiz = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(28), Constraint::Min(1)])
+        .split(area);
 
-        // Left side: GPS data widgets stacked vertically
-        let left_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(9),  // Position info
-                Constraint::Length(8),  // Fix info
-                Constraint::Length(7),  // Telemetry
-                Constraint::Min(0),     // Status/connection info
-            ])
-            .split(main_chunks[0]);
-
-        // Render left side widgets
-        let position_widget = create_position_widget(&state.gps_data);
-        f.render_widget(position_widget, left_chunks[0]);
-
-        let fix_widget = create_fix_widget(&state.gps_data);
-        f.render_widget(fix_widget, left_chunks[1]);
-
-        let telemetry_widget = create_telemetry_widget(&state.gps_data);
-        f.render_widget(telemetry_widget, left_chunks[2]);
-
-        let connection_widget = create_connection_widget(state);
-        f.render_widget(connection_widget, left_chunks[3]);
-
-        // Right side: scrolling application logs from log buffer
-        let logs = self.log_buffer.try_read()
-            .map(|b| b.clone())
-            .unwrap_or_default();
-        self.render_log_panel(f, main_chunks[1], &logs);
-    }
-
-    /// Render compact log panel
-    fn render_log_panel(&self, f: &mut Frame, area: Rect, messages: &[String]) {
-        let log_items: Vec<ListItem> = messages
-            .iter()
-            .rev() // Show newest first
-            .take(area.height.saturating_sub(2) as usize) // Account for borders
-            .map(|log| {
-                // Parse log level and colorize
-                let style = if log.contains("ERROR") || log.contains("Error") {
-                    Style::default().fg(Color::Red)
-                } else if log.contains("WARN") || log.contains("Warning") {
-                    Style::default().fg(Color::Yellow)
-                } else if log.contains("connected") || log.contains("Connected") {
-                    Style::default().fg(Color::Green)
-                } else {
-                    Style::default().fg(Color::Gray)
-                };
-                
-                // Truncate long messages to fit width
-                let max_width = area.width.saturating_sub(3) as usize;
-                let truncated = if log.len() > max_width {
-                    format!("{}...", &log[..max_width.saturating_sub(3)])
-                } else {
-                    log.clone()
-                };
-                
-                ListItem::new(truncated).style(style)
-            })
-            .collect();
-
-        let logs_widget = List::new(log_items)
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title("Activity Log"));
-
-        f.render_widget(logs_widget, area);
-    }
-
-    /// Render satellites tab
-    fn render_satellites(&self, f: &mut Frame, area: Rect, state: &AppState) {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
-
-        // Satellite list
-        let sat_list = create_satellite_list_widget(&state.gps_data);
-        f.render_widget(sat_list, chunks[0]);
-
-        // Satellite sky chart
-        let sky_chart = create_satellite_sky_chart(&state.gps_data);
-        f.render_widget(sky_chart, chunks[1]);
-    }
-
-    /// Render full logs tab
-    fn render_full_logs(&self, f: &mut Frame, area: Rect) {
-        let logs = self.log_buffer.try_read()
-            .map(|b| b.clone())
-            .unwrap_or_default();
-            
-        let log_items: Vec<ListItem> = logs
-            .iter()
-            .rev() // Show newest first
-            .take(area.height as usize - 2) // Account for borders
-            .map(|log| {
-                let style = if log.contains("ERROR") {
-                    Style::default().fg(Color::Red)
-                } else if log.contains("WARN") {
-                    Style::default().fg(Color::Yellow)
-                } else if log.contains("INFO") {
-                    Style::default().fg(Color::Green)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                ListItem::new(log.as_str()).style(style)
-            })
-            .collect();
-
-        let logs_widget = List::new(log_items)
-            .block(Block::default().borders(Borders::ALL).title("Application Logs"));
-
-        f.render_widget(logs_widget, area);
-    }
-
-    /// Render raw GPS NMEA data tab
-    fn render_raw_gps(&self, f: &mut Frame, area: Rect, state: &AppState) {
-        let raw_items: Vec<ListItem> = state.gps_data.raw_nmea_buffer
-            .iter()
-            .rev() // Show newest first
-            .take(area.height as usize - 2) // Account for borders
-            .map(|sentence| {
-                // Color code by sentence type
-                let style = if sentence.starts_with("$GPGGA") || sentence.starts_with("$GNGGA") {
-                    Style::default().fg(Color::Green) // Position
-                } else if sentence.starts_with("$GPGSV") || sentence.starts_with("$GLGSV") || sentence.starts_with("$GAGSV") {
-                    Style::default().fg(Color::Cyan) // Satellites
-                } else if sentence.starts_with("$GPRMC") || sentence.starts_with("$GNRMC") {
-                    Style::default().fg(Color::Yellow) // Recommended minimum
-                } else if sentence.starts_with("$GPGSA") || sentence.starts_with("$GNGSA") {
-                    Style::default().fg(Color::Magenta) // DOP and active satellites
-                } else {
-                    Style::default().fg(Color::Gray)
-                };
-                ListItem::new(sentence.as_str()).style(style)
-            })
-            .collect();
-
-        let raw_widget = List::new(raw_items)
-            .block(Block::default().borders(Borders::ALL).title("📡 Raw GPS NMEA Data"));
-
-        f.render_widget(raw_widget, area);
-    }
-
-    /// Render status bar
-    fn render_status_bar(&self, f: &mut Frame, area: Rect, state: &AppState) {
-        let mqtt_status_str = match state.mqtt_status {
-            MqttStatus::Connected => "MQTT: Connected",
-            MqttStatus::Connecting => "MQTT: Connecting...",
-            MqttStatus::Disconnected => "MQTT: Disconnected",
-            MqttStatus::Error => "MQTT: Error",
-        };
-
-        let mqtt_color = match state.mqtt_status {
-            MqttStatus::Connected => Color::Green,
-            MqttStatus::Connecting => Color::Yellow,
-            MqttStatus::Disconnected => Color::Gray,
-            MqttStatus::Error => Color::Red,
-        };
-
-        let serial_status_str = if state.serial_connected {
-            "Serial: Connected"
+    let conn_widget = render_connections_widget(&AppState {
+        serial_connected: snap.serial_connected,
+        mqtt_enabled: snap.mqtt_enabled,
+        mqtt_status: if snap.mqtt_connected {
+            MqttStatus::Connected
         } else {
-            "Serial: Disconnected"
-        };
+            MqttStatus::Disconnected
+        },
+        connection_address: snap.connection_address.clone(),
+        mqtt_address: snap.mqtt_address.clone(),
+        messages_published: snap.messages_published,
+        gps_data: Default::default(),
+    });
+    f.render_widget(conn_widget, horiz[0]);
 
-        let serial_color = if state.serial_connected {
-            Color::Green
-        } else {
-            Color::Red
-        };
+    let data_widget = render_gps_data_widget(&snap.gps_data);
+    f.render_widget(data_widget, horiz[1]);
+}
 
-        let status_line = Line::from(vec![
-            Span::styled(mqtt_status_str, Style::default().fg(mqtt_color)),
-            Span::raw(" | "),
-            Span::styled(serial_status_str, Style::default().fg(serial_color)),
-            Span::raw(" | "),
-            Span::styled("Press 'q' or ESC to quit", Style::default().fg(Color::Gray)),
-        ]);
+// ── Tab 2: Satellites ────────────────────────────────────────────────────────
 
-        let status_bar = Paragraph::new(status_line)
-            .block(Block::default().borders(Borders::ALL));
+fn render_satellites(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
+    let horiz = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
 
-        f.render_widget(status_bar, area);
+    let sat_list = create_satellite_list_widget(&snap.gps_data);
+    f.render_widget(sat_list, horiz[0]);
+
+    let sky = create_satellite_sky_chart(&snap.gps_data);
+    f.render_widget(sky, horiz[1]);
+}
+
+// ── Tab 3: Full log ──────────────────────────────────────────────────────────
+
+fn render_full_logs(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
+    let max_lines = area.height.saturating_sub(2) as usize;
+    let start = snap.logs.len().saturating_sub(max_lines);
+    let items: Vec<ListItem> = snap.logs[start..]
+        .iter()
+        .map(|line| {
+            let style = log_line_style(line);
+            ListItem::new(line.as_str()).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::default().title(" APP LOGS ").borders(Borders::ALL));
+    f.render_widget(list, area);
+}
+
+// ── Tab 4: Raw NMEA ──────────────────────────────────────────────────────────
+
+fn render_raw_gps(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
+    let max_lines = area.height.saturating_sub(2) as usize;
+    let buf = &snap.gps_data.raw_nmea_buffer;
+    let start = buf.len().saturating_sub(max_lines);
+    let items: Vec<ListItem> = buf[start..]
+        .iter()
+        .map(|sentence| {
+            let style = if sentence.starts_with("$GPGGA") || sentence.starts_with("$GNGGA") {
+                Style::default().fg(Color::Green)
+            } else if sentence.starts_with("$GPGSV")
+                || sentence.starts_with("$GLGSV")
+                || sentence.starts_with("$GAGSV")
+            {
+                Style::default().fg(Color::Cyan)
+            } else if sentence.starts_with("$GPRMC") || sentence.starts_with("$GNRMC") {
+                Style::default().fg(Color::Yellow)
+            } else if sentence.starts_with("$GPGSA") || sentence.starts_with("$GNGSA") {
+                Style::default().fg(Color::Magenta)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            ListItem::new(sentence.as_str()).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::default().title(" RAW NMEA ").borders(Borders::ALL));
+    f.render_widget(list, area);
+}
+
+// ── Shared log panel (bottom, always visible) ────────────────────────────────
+
+fn render_log(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
+    let max_lines = area.height.saturating_sub(2) as usize;
+    let start = snap.logs.len().saturating_sub(max_lines);
+    let items: Vec<ListItem> = snap.logs[start..]
+        .iter()
+        .map(|line| ListItem::new(line.as_str()).style(log_line_style(line)))
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .title(" LOG (most recent) ")
+            .borders(Borders::ALL),
+    );
+    f.render_widget(list, area);
+}
+
+fn log_line_style(line: &str) -> Style {
+    if line.contains("ERROR") || line.contains("Error") {
+        Style::default().fg(Color::Red)
+    } else if line.contains("WARN") || line.contains("Warning") {
+        Style::default().fg(Color::Yellow)
+    } else if line.contains("INFO") || line.contains("connected") || line.contains("Connected") {
+        Style::default().fg(Color::Gray)
+    } else {
+        Style::default().fg(Color::DarkGray)
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "gps-to-mqtt"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["askrejans"]
 description = "GPS to MQTT bridge"
@@ -9,14 +9,27 @@ repository = "https://github.com/askrejans/gps-to-mqtt"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.50.0", features = ["full"] }
+tokio-util = "0.7.18"
+futures-util = "0.3.32"
 
 # Serial port
 serialport = "4.8.1"
 
 # Configuration
-config = "0.15.19"
-clap = { version = "4.5", features = ["derive"] }
+config = "0.15"
+serde = { version = "1", features = ["derive"] }
+dotenvy = "0.15"
+
+# CLI
+gumdrop = "0.8"
+
+# TTY detection
+atty = "0.2"
+
+# Signal handling
+signal-hook = "0.4.3"
+signal-hook-tokio = { version = "0.4.0", features = ["futures-v0_3"] }
 
 # MQTT (async client)
 rumqttc = "0.25.1"
@@ -24,18 +37,17 @@ rumqttc = "0.25.1"
 # Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
-tracing-appender = "0.2"
 
 # TUI
-ratatui = "0.29"
-crossterm = "0.29.0"
+ratatui = "0.30.0"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
 
 # Error handling
-thiserror = "2.0.17"
-anyhow = "1.0"
+thiserror = "2.0.18"
+anyhow = "1.0.102"
 
 # Data structures
-chrono = "0.4"
+chrono = "0.4.44"
 
 # XML parsing (for GPX files)
-quick-xml = "0.38.4"
+quick-xml = "0.39.2"

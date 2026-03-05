@@ -10,7 +10,7 @@ This Rust project serves as a bridge between GPS hardware and MQTT-based systems
 - **Real-time MQTT Publishing**: Converts GPS data into structured MQTT messages with configurable topics and QoS levels
 - **High-Frequency Updates**: Optional support for 10Hz update rates on compatible u-blox GPS modules
 - **Flexible Configuration**: TOML-based configuration for serial port settings, MQTT broker details, and topic customization
-- **Multiple Operational Modes**: TUI (interactive), CLI (minimal), and Service (daemon) modes
+- **Automatic Mode Detection**: Runs the interactive TUI when attached to a terminal; falls back to structured service logging when run as a daemon
 - **Racing Telemetry**: Advanced telemetry calculations including acceleration, g-forces, lap timing, and track analysis
 
 ### Hardware Compatibility
@@ -100,60 +100,70 @@ To build the project, follow these steps:
 
 ```bash
 cargo build --release
-sudo cp target/release/gps-to-mqtt /opt/gps-to-mqtt/
-sudo cp example.settings.toml /etc/g86-car-telemetry/gps-to-mqtt.toml
+sudo install -Dm755 target/release/gps-to-mqtt /usr/bin/gps-to-mqtt
+sudo install -Dm644 example.settings.toml /etc/gps-to-mqtt/settings.toml
 ```
 
 ### As a Systemd Service
 
 ```bash
-# Copy the service file
-sudo cp gps-to-mqtt.service /etc/systemd/system/
-
-# Create user and directories
-sudo useradd -r -s /bin/false gps
-sudo mkdir -p /opt/gps-to-mqtt
-sudo mkdir -p /var/log/gps-to-mqtt
-sudo chown gps:gps /var/log/gps-to-mqtt
-
-# Enable and start the service
+sudo cp gps-to-mqtt.service /lib/systemd/system/
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin gps
 sudo systemctl daemon-reload
-sudo systemctl enable gps-to-mqtt
-sudo systemctl start gps-to-mqtt
+sudo systemctl enable --now gps-to-mqtt
 ```
+
+### Build DEB / RPM Packages
+
+Requires [`cross`](https://github.com/cross-rs/cross) and [`fpm`](https://fpm.readthedocs.io/):
+
+```bash
+cargo install cross
+gem install fpm
+
+# Build all packages for both architectures
+./scripts/build_packages.sh
+
+# Or target a specific arch/format:
+./scripts/build_packages.sh --arch arm64 --type deb
+./scripts/build_packages.sh --arch x86-64 --type rpm
+```
+
+Packages are written to `dist/`.
 
 ## Usage
 
-### TUI Mode (Default for interactive use)
+### Interactive (TUI) mode
+
+When the process is attached to a terminal the interactive four-tab dashboard starts automatically:
 
 ```bash
-gps-to-mqtt --mode tui
+gps-to-mqtt
+gps-to-mqtt --config /path/to/settings.toml
 ```
 
 **TUI Controls:**
-- `1` or `Left/Right`: Switch between tabs
-- `q` or `ESC`: Quit application
+| Key | Action |
+|-----|--------|
+| `1` / `2` / `3` / `4` | Switch tabs directly |
+| `Left` / `Right` | Cycle tabs |
+| `q` / `Ctrl-C` | Quit |
 
 **TUI Tabs:**
-- **Overview**: GPS position, speed, altitude, fix information, and messages
-- **Satellites**: Detailed satellite list and sky view chart
-- **Logs**: Real-time application logs with color coding
+- **Overview (1)**: Connection status panel + live GPS data (position, fix, heading)
+- **Satellites (2)**: Satellite list and sky-view chart
+- **App Logs (3)**: Scrolling log ring-buffer
+- **Raw GPS (4)**: Colour-coded NMEA sentences
 
-### CLI Mode
+### Service / daemon mode
 
-```bash
-gps-to-mqtt --mode cli --config /path/to/config.toml
-```
-
-Use this mode for debugging or when you want minimal terminal output with structured logging.
-
-### Service Mode
+When run with stdout redirected (e.g. as a systemd unit) the TUI is skipped and structured logs are written to stdout/journald:
 
 ```bash
-gps-to-mqtt --mode service --config /etc/g86-car-telemetry/gps-to-mqtt.toml
+gps-to-mqtt --config /etc/gps-to-mqtt/settings.toml
 ```
 
-This mode is designed for running as a systemd service with JSON logging to files or journald.
+See `gps-to-mqtt.service` for a ready-made unit file.
 
 ## Project Structure
 
@@ -180,38 +190,45 @@ Configuration is loaded from TOML files. The application searches for configurat
 
 ### Configuration Options
 
+See `example.settings.toml` for the full annotated reference. Common options:
+
 ```toml
-# Serial Port Configuration
-port_name = "/dev/ttyACM0"              # Serial port device path
-baud_rate = 9600                        # Serial baud rate
-set_gps_to_10hz = false                 # Enable 10Hz mode (u-blox specific)
+port_name = "/dev/ttyACM0"
+baud_rate  = 9600
+set_gps_to_10hz = false
 
-# MQTT Configuration
-mqtt_host = "localhost"                 # MQTT broker hostname
-mqtt_port = 1883                        # MQTT broker port
-mqtt_client_id = "gps-to-mqtt"          # MQTT client identifier
-mqtt_base_topic = "/GOLF86/GPS"         # Base topic for all GPS data
-mqtt_reconnect_max_attempts = 0         # Max reconnection attempts (0 = infinite)
+mqtt_enabled = true          # false = display-only, no MQTT publishing
+mqtt_host    = "localhost"
+mqtt_port    = 1883
+# mqtt_client_id = "gps-to-mqtt"   # auto-generated when absent
+mqtt_base_topic = "/GOLF86/GPS"
+# mqtt_username = ""
+# mqtt_password = ""
+# mqtt_use_tls  = false
 
-# Logging Configuration
-log_level = "info"                      # Log level: trace, debug, info, warn, error
-log_file_path = "/var/log/gps-to-mqtt/gps-to-mqtt.log"  # Log file path (service mode)
+log_level = "info"           # trace | debug | info | warn | error
+log_json  = false             # true = JSON structured logs
 
-# TUI Configuration
-tui_refresh_rate_ms = 100               # TUI refresh rate in milliseconds
-max_log_buffer_size = 1000              # Maximum log entries in TUI
-
-# Telemetry Configuration
-telemetry_enabled = true                # Enable telemetry calculations
-telemetry_smoothing_window = 3          # Number of samples for moving average
-
-# Track/Lap Timing Configuration
-track_mode = "disabled"                 # Options: "disabled", "manual", "learn", "gpx"
-track_geofence_radius = 15.0            # Geofence radius in meters
-# track_start_lat = 40.7128             # Start/Finish latitude (for manual mode)
-# track_start_lon = -74.0060            # Start/Finish longitude (for manual mode)
-# track_gpx_file = "/path/to/track.gpx" # GPX file path (for gpx mode)
+track_mode = "disabled"      # disabled | manual | learn | gpx
 ```
+
+### Environment Variables
+
+All settings can be overridden via `GPS_TO_MQTT_*` environment variables
+(highest priority — overrides any config file):
+
+| Variable | Equivalent setting |
+|----------|-------------------|
+| `GPS_TO_MQTT_PORT_NAME` | `port_name` |
+| `GPS_TO_MQTT_BAUD_RATE` | `baud_rate` |
+| `GPS_TO_MQTT_MQTT_ENABLED` | `mqtt_enabled` |
+| `GPS_TO_MQTT_MQTT_HOST` | `mqtt_host` |
+| `GPS_TO_MQTT_MQTT_PORT` | `mqtt_port` |
+| `GPS_TO_MQTT_MQTT_BASE_TOPIC` | `mqtt_base_topic` |
+| `GPS_TO_MQTT_MQTT_USERNAME` | `mqtt_username` |
+| `GPS_TO_MQTT_MQTT_PASSWORD` | `mqtt_password` |
+| `GPS_TO_MQTT_LOG_LEVEL` | `log_level` |
+| `GPS_TO_MQTT_LOG_JSON` | `log_json` |
 
 ## MQTT Topics
 
@@ -332,20 +349,28 @@ cargo build
 cargo test
 ```
 
-### Run with Logging
+### Run with Debug Logging
 
 ```bash
-RUST_LOG=debug cargo run -- --mode tui
+RUST_LOG=debug cargo run
 ```
 
-### Cross-Compilation for ARM (Raspberry Pi)
+### Run with a Custom Config
 
 ```bash
-# Install cross-compilation toolchain
-rustup target add armv7-unknown-linux-gnueabihf
+cargo run -- --config /path/to/settings.toml
+```
 
-# Build
-cargo build --release --target armv7-unknown-linux-gnueabihf
+### Cross-Compilation
+
+The build script uses `cross` with `musl` targets for fully-static binaries:
+
+- `x86_64-unknown-linux-musl` (x86-64)
+- `aarch64-unknown-linux-musl` (arm64 / Raspberry Pi 4+)
+
+```bash
+# Manual cross-build example
+cross build --release --target aarch64-unknown-linux-musl
 ```
 
 ## Troubleshooting

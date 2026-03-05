@@ -12,7 +12,11 @@ pub enum GpsEvent {
     Message(String),
     RawNmea(String), // Raw NMEA sentence for display
     #[allow(dead_code)]
-    AccuracyUpdate { std_lat: f64, std_lon: f64, std_alt: f64 }, // From GST
+    AccuracyUpdate {
+        std_lat: f64,
+        std_lon: f64,
+        std_alt: f64,
+    }, // From GST
     RateOfTurn(f64), // degrees/minute from ROT
     TrueHeading(f64), // degrees from HDT
 }
@@ -48,20 +52,20 @@ pub fn parse_nmea_sentence(sentence: &str) -> Result<Vec<GpsEvent>> {
 
 #[derive(Debug)]
 enum NmeaSentence {
-    GSV,    // Satellites in view
-    GGA,    // Fix information
-    RMC,    // Recommended minimum data
-    VTG,    // Vector track and speed over ground
-    GSA,    // Overall satellite data
-    GLL,    // Geographic position
-    TXT,    // Text transmission
-    GRS,    // GNSS Range Residuals
-    GST,    // GNSS Pseudorange Error Statistics
-    GNS,    // GNSS Fix Data
-    VLW,    // Dual Ground/Water Distance
-    PUBX,   // PUBX proprietary messages
-    ROT,    // Rate of Turn
-    HDT,    // True Heading
+    GSV,  // Satellites in view
+    GGA,  // Fix information
+    RMC,  // Recommended minimum data
+    VTG,  // Vector track and speed over ground
+    GSA,  // Overall satellite data
+    GLL,  // Geographic position
+    TXT,  // Text transmission
+    GRS,  // GNSS Range Residuals
+    GST,  // GNSS Pseudorange Error Statistics
+    GNS,  // GNSS Fix Data
+    VLW,  // Dual Ground/Water Distance
+    PUBX, // PUBX proprietary messages
+    ROT,  // Rate of Turn
+    HDT,  // True Heading
     Unknown,
 }
 
@@ -155,7 +159,7 @@ fn parse_gga(sentence: &str) -> Result<Vec<GpsEvent>> {
     // Parse position
     let lat = parse_coordinate(parts[2], parts[3]).ok();
     let lon = parse_coordinate(parts[4], parts[5]).ok();
-    
+
     if lat.is_some() || lon.is_some() {
         let nav = NavigationData {
             latitude: lat,
@@ -310,7 +314,9 @@ fn parse_txt(sentence: &str) -> Result<Vec<GpsEvent>> {
         return Ok(vec![]);
     }
 
-    let message = parts[4].trim_end_matches('*').trim_end_matches(|c: char| c.is_ascii_hexdigit());
+    let message = parts[4]
+        .trim_end_matches('*')
+        .trim_end_matches(|c: char| c.is_ascii_hexdigit());
     Ok(vec![GpsEvent::Message(message.to_string())])
 }
 
@@ -325,7 +331,7 @@ fn parse_gns(sentence: &str) -> Result<Vec<GpsEvent>> {
 
     let lat = parse_coordinate(parts[2], parts[3]).ok();
     let lon = parse_coordinate(parts[4], parts[5]).ok();
-    
+
     if lat.is_some() || lon.is_some() {
         let nav = NavigationData {
             latitude: lat,
@@ -361,7 +367,7 @@ fn parse_pubx(sentence: &str) -> Result<Vec<GpsEvent>> {
 
         let lat = parse_coordinate(parts[3], parts[4]).ok();
         let lon = parse_coordinate(parts[5], parts[6]).ok();
-        
+
         if lat.is_some() || lon.is_some() {
             let nav = NavigationData {
                 latitude: lat,
@@ -398,8 +404,7 @@ fn parse_time(time_str: &str) -> Result<NaiveTime> {
     let minute: u32 = time_str[2..4].parse().context("Invalid minute")?;
     let second: u32 = time_str[4..6].parse().context("Invalid second")?;
 
-    NaiveTime::from_hms_opt(hour, minute, second)
-        .context("Invalid time values")
+    NaiveTime::from_hms_opt(hour, minute, second).context("Invalid time values")
 }
 
 /// Parse date from NMEA format (DDMMYY)
@@ -412,8 +417,7 @@ fn parse_date(date_str: &str) -> Result<NaiveDate> {
     let month: u32 = date_str[2..4].parse().context("Invalid month")?;
     let year: i32 = date_str[4..6].parse::<i32>().context("Invalid year")? + 2000;
 
-    NaiveDate::from_ymd_opt(year, month, day)
-        .context("Invalid date values")
+    NaiveDate::from_ymd_opt(year, month, day).context("Invalid date values")
 }
 
 /// Parse coordinate from NMEA format (DDMM.MMMM or DDDMM.MMMM)
@@ -423,11 +427,15 @@ fn parse_coordinate(coord_str: &str, dir: &str) -> Result<f64> {
     }
 
     let dot_pos = coord_str.find('.').context("No decimal point")?;
-    
+
     // Extract degrees (everything before last 2 digits before decimal)
-    let deg_end = if dot_pos >= 4 { dot_pos - 2 } else { dot_pos.saturating_sub(2) };
+    let deg_end = if dot_pos >= 4 {
+        dot_pos - 2
+    } else {
+        dot_pos.saturating_sub(2)
+    };
     let degrees: f64 = coord_str[0..deg_end].parse().context("Invalid degrees")?;
-    
+
     // Extract minutes
     let minutes: f64 = coord_str[deg_end..].parse().context("Invalid minutes")?;
 
@@ -451,10 +459,18 @@ fn parse_gst(sentence: &str) -> Result<Vec<GpsEvent>> {
     // GST provides standard deviation of position errors
     let std_lat: f64 = parts[6].parse().unwrap_or(0.0);
     let std_lon: f64 = parts[7].parse().unwrap_or(0.0);
-    let std_alt: f64 = parts[8].split('*').next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let std_alt: f64 = parts[8]
+        .split('*')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
 
     if std_lat > 0.0 || std_lon > 0.0 || std_alt > 0.0 {
-        Ok(vec![GpsEvent::AccuracyUpdate { std_lat, std_lon, std_alt }])
+        Ok(vec![GpsEvent::AccuracyUpdate {
+            std_lat,
+            std_lon,
+            std_alt,
+        }])
     } else {
         Ok(vec![])
     }
@@ -493,15 +509,37 @@ fn parse_hdt(sentence: &str) -> Result<Vec<GpsEvent>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Datelike, Timelike};
+
+    // --- coordinate parsing ---
 
     #[test]
-    fn test_parse_coordinate() {
-        assert!((parse_coordinate("4807.038", "N").unwrap() - 48.1173).abs() < 0.001);
-        assert!((parse_coordinate("01131.000", "W").unwrap() + 11.5166).abs() < 0.001);
+    fn test_parse_coordinate_north() {
+        let lat = parse_coordinate("4807.038", "N").unwrap();
+        assert!((lat - 48.1173).abs() < 0.001);
     }
 
     #[test]
-    fn test_parse_time() {
+    fn test_parse_coordinate_west() {
+        let lon = parse_coordinate("01131.000", "W").unwrap();
+        assert!((lon + 11.5166).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_coordinate_south_is_negative() {
+        let lat = parse_coordinate("3351.000", "S").unwrap();
+        assert!(lat < 0.0);
+    }
+
+    #[test]
+    fn test_parse_coordinate_empty_is_err() {
+        assert!(parse_coordinate("", "N").is_err());
+    }
+
+    // --- time parsing ---
+
+    #[test]
+    fn test_parse_time_hhmmss() {
         let time = parse_time("123519").unwrap();
         assert_eq!(time.hour(), 12);
         assert_eq!(time.minute(), 35);
@@ -509,10 +547,193 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_date() {
-        let date = parse_date("230394").unwrap();
+    fn test_parse_time_with_subseconds() {
+        let time = parse_time("092750.000").unwrap();
+        assert_eq!(time.hour(), 9);
+        assert_eq!(time.minute(), 27);
+        assert_eq!(time.second(), 50);
+    }
+
+    #[test]
+    fn test_parse_time_too_short_is_err() {
+        assert!(parse_time("123").is_err());
+    }
+
+    // --- date parsing ---
+
+    #[test]
+    fn test_parse_date_ddmmyy() {
+        // 23rd March 2023 → "230323"
+        let date = parse_date("230323").unwrap();
         assert_eq!(date.year(), 2023);
         assert_eq!(date.month(), 3);
-        assert_eq!(date.day(), 94); // This would fail - intentional for testing
+        assert_eq!(date.day(), 23);
+    }
+
+    #[test]
+    fn test_parse_date_too_short_is_err() {
+        assert!(parse_date("230").is_err());
+    }
+
+    // --- sentence-level validation ---
+
+    #[test]
+    fn test_invalid_sentence_no_dollar_ignored() {
+        let events = parse_nmea_sentence("GPRMC,123519,A*XX").unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_invalid_sentence_no_checksum_ignored() {
+        let events = parse_nmea_sentence("$GPRMC,123519,A").unwrap();
+        assert!(events.is_empty());
+    }
+
+    // --- sentence parsers ---
+
+    #[test]
+    fn test_parse_rmc_returns_nav_and_fix() {
+        let s = "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230323,003.1,W*66";
+        let events = parse_nmea_sentence(s).unwrap();
+        assert!(!events.is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GpsEvent::NavigationUpdate(_)))
+        );
+        assert!(events.iter().any(|e| matches!(e, GpsEvent::FixUpdate(_))));
+    }
+
+    #[test]
+    fn test_parse_rmc_navigation_values() {
+        let s = "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230323,003.1,W*66";
+        let events = parse_nmea_sentence(s).unwrap();
+        let nav = events
+            .iter()
+            .find_map(|e| {
+                if let GpsEvent::NavigationUpdate(n) = e {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+            .expect("expected NavigationUpdate");
+        let lat = nav.latitude.unwrap();
+        let lon = nav.longitude.unwrap();
+        assert!((lat - 48.1173).abs() < 0.001);
+        assert!((lon - 11.5166).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_gga_returns_nav_and_fix() {
+        let s = "$GPGGA,092750.000,5321.6802,N,00630.3372,W,1,8,1.03,61.7,M,55.2,M,,*76";
+        let events = parse_nmea_sentence(s).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GpsEvent::NavigationUpdate(_)))
+        );
+        assert!(events.iter().any(|e| matches!(e, GpsEvent::FixUpdate(_))));
+    }
+
+    #[test]
+    fn test_parse_gga_fix_quality() {
+        let s = "$GPGGA,092750.000,5321.6802,N,00630.3372,W,1,8,1.03,61.7,M,55.2,M,,*76";
+        let events = parse_nmea_sentence(s).unwrap();
+        let fix = events
+            .iter()
+            .find_map(|e| {
+                if let GpsEvent::FixUpdate(f) = e {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .expect("expected FixUpdate");
+        assert_eq!(fix.fix_quality, Some(crate::models::FixQuality::GpsFix));
+        assert_eq!(fix.satellites_used, Some(8));
+    }
+
+    #[test]
+    fn test_parse_vtg_speed_kph() {
+        let s = "$GPVTG,054.7,T,034.4,M,005.5,N,010.2,K*48";
+        let events = parse_nmea_sentence(s).unwrap();
+        let nav = events
+            .iter()
+            .find_map(|e| {
+                if let GpsEvent::NavigationUpdate(n) = e {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+            .expect("expected NavigationUpdate");
+        assert!((nav.speed_kph.unwrap() - 10.2).abs() < 0.01);
+        assert!((nav.speed_knots.unwrap() - 5.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_gsa_fix_type_3d() {
+        // mode=3 → Fix3D
+        let s = "$GPGSA,A,3,04,05,,09,12,,24,,,,,,2.5,1.3,2.1*39";
+        let events = parse_nmea_sentence(s).unwrap();
+        let fix = events
+            .iter()
+            .find_map(|e| {
+                if let GpsEvent::FixUpdate(f) = e {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .expect("expected FixUpdate");
+        assert_eq!(fix.fix_type, Some(crate::models::FixType::Fix3D));
+    }
+
+    #[test]
+    fn test_parse_gsv_produces_satellite_updates() {
+        let s = "$GPGSV,3,1,11,03,03,111,00,04,15,270,00,06,01,010,00,13,06,292,00*74";
+        let events = parse_nmea_sentence(s).unwrap();
+        let sat_count = events
+            .iter()
+            .filter(|e| matches!(e, GpsEvent::SatelliteUpdate(_)))
+            .count();
+        assert!(sat_count > 0);
+    }
+
+    #[test]
+    fn test_parse_gsv_gnss_system_gps() {
+        let s = "$GPGSV,1,1,04,03,03,111,40*7F";
+        let events = parse_nmea_sentence(s).unwrap();
+        if let GpsEvent::SatelliteUpdate(sat) = &events[0] {
+            assert_eq!(sat.system, crate::models::GnssSystem::Gps);
+            assert_eq!(sat.prn, 3);
+        } else {
+            panic!("expected SatelliteUpdate");
+        }
+    }
+
+    #[test]
+    fn test_parse_hdt_true_heading() {
+        let s = "$HEHDT,274.07,T*1C";
+        let events = parse_nmea_sentence(s).unwrap();
+        assert_eq!(events.len(), 1);
+        if let GpsEvent::TrueHeading(h) = events[0] {
+            assert!((h - 274.07).abs() < 0.01);
+        } else {
+            panic!("expected TrueHeading");
+        }
+    }
+
+    #[test]
+    fn test_parse_rot_rate_of_turn() {
+        let s = "$HEROT,25.6,A*3E";
+        let events = parse_nmea_sentence(s).unwrap();
+        assert_eq!(events.len(), 1);
+        if let GpsEvent::RateOfTurn(r) = events[0] {
+            assert!((r - 25.6).abs() < 0.01);
+        } else {
+            panic!("expected RateOfTurn");
+        }
     }
 }

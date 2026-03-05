@@ -1,8 +1,9 @@
-use anyhow::Result;
-use tokio::signal;
-use tracing::{info, warn};
+//! Signal handling for graceful shutdown in service / CLI mode.
 
-/// Handle Unix signals for graceful shutdown
+use tokio::signal;
+use tracing::info;
+
+/// Wait for Ctrl+C or SIGTERM (Unix) then return — used in non-TTY mode.
 pub async fn wait_for_shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()
@@ -22,34 +23,9 @@ pub async fn wait_for_shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {
-            info!("Received Ctrl+C signal");
-        },
-        _ = terminate => {
-            info!("Received SIGTERM signal");
-        },
+        _ = ctrl_c => { info!("Received Ctrl+C"); },
+        _ = terminate => { info!("Received SIGTERM"); },
     }
-}
-
-/// Set up a signal handler for SIGHUP to support configuration reload in daemon mode
-#[allow(dead_code)]
-pub async fn setup_sighup_handler() -> Result<tokio::sync::mpsc::Receiver<()>> {
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
-
-    tokio::spawn(async move {
-        let mut stream = signal::unix::signal(signal::unix::SignalKind::hangup())
-            .expect("Failed to install SIGHUP handler");
-
-        while stream.recv().await.is_some() {
-            info!("Received SIGHUP signal");
-            if tx.send(()).await.is_err() {
-                warn!("SIGHUP receiver dropped");
-                break;
-            }
-        }
-    });
-
-    Ok(rx)
 }
 
 #[cfg(not(unix))]

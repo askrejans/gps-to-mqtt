@@ -1,17 +1,6 @@
 use chrono::{NaiveDate, NaiveTime};
 use std::collections::{BTreeMap, HashMap};
 
-/// Represents the operational mode of the application
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppMode {
-    /// Interactive TUI mode with dashboard
-    Tui,
-    /// CLI mode with minimal output
-    Cli,
-    /// Service mode for running as daemon
-    Service,
-}
-
 /// GNSS system type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GnssSystem {
@@ -162,6 +151,14 @@ pub struct AppState {
     pub gps_data: GpsData,
     pub mqtt_status: MqttStatus,
     pub serial_connected: bool,
+    /// Whether MQTT publishing is enabled
+    pub mqtt_enabled: bool,
+    /// Human-readable GPS connection string (e.g. "/dev/ttyUSB0 @ 9600 baud")
+    pub connection_address: String,
+    /// Human-readable MQTT broker address (e.g. "localhost:1883")
+    pub mqtt_address: String,
+    /// Total MQTT messages published since startup
+    pub messages_published: u64,
 }
 
 impl Default for AppState {
@@ -170,13 +167,11 @@ impl Default for AppState {
             gps_data: GpsData::new(),
             mqtt_status: MqttStatus::Disconnected,
             serial_connected: false,
+            mqtt_enabled: true,
+            connection_address: String::new(),
+            mqtt_address: String::new(),
+            messages_published: 0,
         }
-    }
-}
-
-impl AppState {
-    pub fn new() -> Self {
-        Self::default()
     }
 }
 
@@ -196,8 +191,8 @@ pub struct TelemetryMetrics {
 #[derive(Debug, Clone)]
 pub struct LapData {
     pub lap_number: u32,
-    pub lap_time_ms: Option<u64>,        // Current/last lap time in milliseconds
-    pub best_lap_ms: Option<u64>,        // Best lap time in milliseconds
+    pub lap_time_ms: Option<u64>, // Current/last lap time in milliseconds
+    pub best_lap_ms: Option<u64>, // Best lap time in milliseconds
     pub current_lap_start_ms: Option<u64>, // Timestamp when current lap started
     pub sector_times_ms: Vec<Option<u64>>, // Sector times in milliseconds
 }
@@ -225,10 +220,10 @@ pub struct TrackConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackConfigMode {
-    Manual,     // Manually configured start/finish
-    Learn,      // Learning mode - recording track
-    Gpx,        // Loaded from GPX file
-    Disabled,   // Lap timing disabled
+    Manual,   // Manually configured start/finish
+    Learn,    // Learning mode - recording track
+    Gpx,      // Loaded from GPX file
+    Disabled, // Lap timing disabled
 }
 
 /// A point on the track with geofence radius
@@ -238,7 +233,7 @@ pub struct TrackPoint {
     pub longitude: f64,
     pub radius_meters: f64, // Geofence radius
     #[allow(dead_code)]
-    pub name: String,       // e.g., "Start/Finish", "Sector 1", etc.
+    pub name: String, // e.g., "Start/Finish", "Sector 1", etc.
 }
 
 impl Default for TrackConfig {
@@ -249,5 +244,142 @@ impl Default for TrackConfig {
             sectors: Vec::new(),
             learned_track: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- GpsData ---
+
+    #[test]
+    fn test_gps_data_message_capped_at_100() {
+        let mut gps = GpsData::new();
+        for i in 0..110 {
+            gps.add_message(format!("msg {}", i));
+        }
+        assert_eq!(gps.messages.len(), 100);
+    }
+
+    #[test]
+    fn test_gps_data_raw_nmea_capped_at_500() {
+        let mut gps = GpsData::new();
+        for i in 0..510 {
+            gps.add_raw_nmea(format!("$GNRMC,{}", i));
+        }
+        assert_eq!(gps.raw_nmea_buffer.len(), 500);
+    }
+
+    #[test]
+    fn test_update_satellite_stores_and_sets_update_time() {
+        let mut gps = GpsData::new();
+        let sat = SatelliteInfo {
+            prn: 7,
+            elevation: Some(45),
+            azimuth: Some(180),
+            snr: Some(35),
+            system: GnssSystem::Gps,
+        };
+        gps.update_satellite(sat);
+        assert_eq!(gps.satellites.len(), 1);
+        assert_eq!(gps.satellites[&7].snr, Some(35));
+        assert!(gps.last_update.is_some());
+    }
+
+    #[test]
+    fn test_update_satellite_overwrites_existing_prn() {
+        let mut gps = GpsData::new();
+        gps.update_satellite(SatelliteInfo {
+            prn: 1,
+            elevation: Some(10),
+            azimuth: None,
+            snr: Some(20),
+            system: GnssSystem::Gps,
+        });
+        gps.update_satellite(SatelliteInfo {
+            prn: 1,
+            elevation: Some(15),
+            azimuth: None,
+            snr: Some(30),
+            system: GnssSystem::Gps,
+        });
+        assert_eq!(gps.satellites.len(), 1);
+        assert_eq!(gps.satellites[&1].snr, Some(30));
+    }
+
+    #[test]
+    fn test_satellites_by_system_groups_correctly() {
+        let mut gps = GpsData::new();
+        for prn in 1u32..=3 {
+            gps.update_satellite(SatelliteInfo {
+                prn,
+                elevation: None,
+                azimuth: None,
+                snr: None,
+                system: GnssSystem::Gps,
+            });
+        }
+        gps.update_satellite(SatelliteInfo {
+            prn: 65,
+            elevation: None,
+            azimuth: None,
+            snr: None,
+            system: GnssSystem::Glonass,
+        });
+        let by_system = gps.satellites_by_system();
+        assert_eq!(by_system[&GnssSystem::Gps].len(), 3);
+        assert_eq!(by_system[&GnssSystem::Glonass].len(), 1);
+    }
+
+    #[test]
+    fn test_satellites_sorted_by_prn_within_system() {
+        let mut gps = GpsData::new();
+        for prn in &[5u32, 1, 3] {
+            gps.update_satellite(SatelliteInfo {
+                prn: *prn,
+                elevation: None,
+                azimuth: None,
+                snr: None,
+                system: GnssSystem::Gps,
+            });
+        }
+        let by_system = gps.satellites_by_system();
+        let prns: Vec<u32> = by_system[&GnssSystem::Gps].iter().map(|s| s.prn).collect();
+        assert_eq!(prns, vec![1, 3, 5]);
+    }
+
+    // --- AppState ---
+
+    #[test]
+    fn test_app_state_default_values() {
+        let state = AppState::default();
+        assert!(!state.serial_connected);
+        assert!(state.mqtt_enabled);
+        assert_eq!(state.messages_published, 0);
+        assert_eq!(state.mqtt_status, MqttStatus::Disconnected);
+        assert!(state.connection_address.is_empty());
+        assert!(state.mqtt_address.is_empty());
+    }
+
+    // --- LapData ---
+
+    #[test]
+    fn test_lap_data_default() {
+        let lap = LapData::default();
+        assert_eq!(lap.lap_number, 0);
+        assert!(lap.lap_time_ms.is_none());
+        assert!(lap.best_lap_ms.is_none());
+        assert!(lap.sector_times_ms.is_empty());
+    }
+
+    // --- TrackConfig ---
+
+    #[test]
+    fn test_track_config_default_mode_is_disabled() {
+        let cfg = TrackConfig::default();
+        assert_eq!(cfg.mode, TrackConfigMode::Disabled);
+        assert!(cfg.start_finish.is_none());
+        assert!(cfg.sectors.is_empty());
     }
 }

@@ -1,173 +1,273 @@
-use crate::models::{GnssSystem, GpsData};
+use crate::models::{AppState, GnssSystem, GpsData, MqttStatus};
+use ratatui::widgets::canvas::Canvas;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Padding, Paragraph, Wrap},
 };
-use ratatui::widgets::canvas::Canvas;
 use std::f64::consts::PI;
 
-/// Create position information widget
-pub fn create_position_widget(gps_data: &GpsData) -> Paragraph<'static> {
-    let lat = gps_data
-        .navigation
-        .latitude
-        .map(|v| format!("{:.6}°", v))
-        .unwrap_or_else(|| "N/A".to_string());
+// ---------------------------------------------------------------------------
+// Style helpers (speeduino-style)
+// ---------------------------------------------------------------------------
 
-    let lon = gps_data
-        .navigation
-        .longitude
-        .map(|v| format!("{:.6}°", v))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let alt = gps_data
-        .navigation
-        .altitude
-        .map(|v| format!("{:.1} m", v))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let speed = gps_data
-        .navigation
-        .speed_kph
-        .map(|v| format!("{:.1} km/h", v))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let course = gps_data
-        .navigation
-        .course
-        .map(|v| format!("{:.1}°", v))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let text = vec![
-        Line::from(vec![
-            Span::styled("Latitude:  ", Style::default().fg(Color::Cyan)),
-            Span::raw(lat),
-        ]),
-        Line::from(vec![
-            Span::styled("Longitude: ", Style::default().fg(Color::Cyan)),
-            Span::raw(lon),
-        ]),
-        Line::from(vec![
-            Span::styled("Altitude:  ", Style::default().fg(Color::Cyan)),
-            Span::raw(alt),
-        ]),
-        Line::from(vec![
-            Span::styled("Speed:     ", Style::default().fg(Color::Cyan)),
-            Span::raw(speed),
-        ]),
-        Line::from(vec![
-            Span::styled("Course:    ", Style::default().fg(Color::Cyan)),
-            Span::raw(course),
-        ]),
-    ];
-
-    Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Position & Navigation"),
-    )
+pub fn section_line(title: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── {} ──", title),
+        Style::default().fg(Color::DarkGray),
+    ))
 }
 
-/// Create fix information widget
-pub fn create_fix_widget(gps_data: &GpsData) -> Paragraph<'static> {
-    let fix_type = gps_data
-        .fix
-        .fix_type
-        .as_ref()
-        .map(|f| format!("{:?}", f))
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    let fix_quality = gps_data
-        .fix
-        .fix_quality
-        .as_ref()
-        .map(|q| format!("{:?}", q))
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    let sats_used = gps_data
-        .fix
-        .satellites_used
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let sats_view = gps_data
-        .satellites_in_view
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let hdop = gps_data
-        .fix
-        .hdop
-        .map(|h| format!("{:.2}", h))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let time = gps_data
-        .fix
-        .time
-        .map(|t| t.format("%H:%M:%S").to_string())
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let text = vec![
-        Line::from(vec![
-            Span::styled("Fix Type:    ", Style::default().fg(Color::Cyan)),
-            Span::raw(fix_type),
-        ]),
-        Line::from(vec![
-            Span::styled("Fix Quality: ", Style::default().fg(Color::Cyan)),
-            Span::raw(fix_quality),
-        ]),
-        Line::from(vec![
-            Span::styled("Sats Used:   ", Style::default().fg(Color::Cyan)),
-            Span::raw(sats_used),
-        ]),
-        Line::from(vec![
-            Span::styled("Sats in View:", Style::default().fg(Color::Cyan)),
-            Span::raw(sats_view),
-        ]),
-        Line::from(vec![
-            Span::styled("HDOP:        ", Style::default().fg(Color::Cyan)),
-            Span::raw(hdop),
-        ]),
-        Line::from(vec![
-            Span::styled("Time:        ", Style::default().fg(Color::Cyan)),
-            Span::raw(time),
-        ]),
-    ];
-
-    Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Fix Information"))
+pub fn data_row(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{:<12}", label),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(value),
+    ])
 }
 
-/// Create messages widget
-#[allow(dead_code)]
-pub fn create_messages_widget(gps_data: &GpsData) -> Paragraph {
-    let messages: Vec<Line> = gps_data
-        .messages
-        .iter()
-        .rev()
-        .take(20)
-        .map(|msg| Line::from(msg.as_str()))
-        .collect();
-
-    Paragraph::new(messages).block(Block::default().borders(Borders::ALL).title("Messages"))
+pub fn status_indicator(connected: bool) -> Span<'static> {
+    if connected {
+        Span::styled("● ONLINE ", Style::default().fg(Color::Green))
+    } else {
+        Span::styled("○ OFFLINE", Style::default().fg(Color::Red))
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Connections panel
+// ---------------------------------------------------------------------------
+
+/// Renders the connections panel (left column of Overview tab).
+pub fn render_connections_widget(state: &AppState) -> Paragraph<'static> {
+    let mqtt_connected = state.mqtt_status == MqttStatus::Connected;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // GPS / serial connection
+    lines.push(Line::from(vec![
+        Span::styled("GPS:  ", Style::default().add_modifier(Modifier::BOLD)),
+        status_indicator(state.serial_connected),
+    ]));
+    if !state.connection_address.is_empty() {
+        lines.push(Line::from(Span::raw(format!(
+            "  {}",
+            state.connection_address
+        ))));
+    }
+    lines.push(Line::default());
+
+    // MQTT connection
+    lines.push(Line::from(vec![
+        Span::styled("MQTT: ", Style::default().add_modifier(Modifier::BOLD)),
+        if state.mqtt_enabled {
+            status_indicator(mqtt_connected)
+        } else {
+            Span::styled("DISABLED ", Style::default().fg(Color::DarkGray))
+        },
+    ]));
+    if state.mqtt_enabled && !state.mqtt_address.is_empty() {
+        lines.push(Line::from(Span::raw(format!("  {}", state.mqtt_address))));
+    }
+    lines.push(Line::default());
+
+    if state.mqtt_enabled {
+        lines.push(Line::from(vec![
+            Span::styled("Msgs: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(state.messages_published.to_string()),
+        ]));
+    }
+
+    let block = Block::default()
+        .title(" CONNECTIONS ")
+        .borders(Borders::ALL)
+        .padding(Padding::horizontal(1));
+    Paragraph::new(lines).block(block).wrap(Wrap { trim: true })
+}
+
+// ---------------------------------------------------------------------------
+// GPS data panel
+// ---------------------------------------------------------------------------
+
+/// Renders the main GPS data panel with sections (right column of Overview tab).
+pub fn render_gps_data_widget(gps_data: &GpsData) -> Paragraph<'static> {
+    let block = Block::default()
+        .title(" GPS DATA ")
+        .borders(Borders::ALL)
+        .padding(Padding::horizontal(1));
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // ── POSITION ─────────────────────────────────────────────────────────
+    lines.push(section_line("POSITION"));
+    lines.push(data_row(
+        "Latitude",
+        gps_data
+            .navigation
+            .latitude
+            .map(|v| format!("{:.6}°", v))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Longitude",
+        gps_data
+            .navigation
+            .longitude
+            .map(|v| format!("{:.6}°", v))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Altitude",
+        gps_data
+            .navigation
+            .altitude
+            .map(|v| format!("{:.1} m", v))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Speed",
+        gps_data
+            .navigation
+            .speed_kph
+            .map(|v| format!("{:.1} km/h", v))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Course",
+        gps_data
+            .navigation
+            .course
+            .map(|v| format!("{:.1}°", v))
+            .unwrap_or_else(|| "—".into()),
+    ));
+
+    // ── FIX ──────────────────────────────────────────────────────────────
+    lines.push(Line::default());
+    lines.push(section_line("FIX"));
+    lines.push(data_row(
+        "Fix type",
+        gps_data
+            .fix
+            .fix_type
+            .as_ref()
+            .map(|f| format!("{:?}", f))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Quality",
+        gps_data
+            .fix
+            .fix_quality
+            .as_ref()
+            .map(|q| format!("{:?}", q))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Sats used",
+        gps_data
+            .fix
+            .satellites_used
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Sats view",
+        gps_data
+            .satellites_in_view
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "HDOP",
+        gps_data
+            .fix
+            .hdop
+            .map(|h| format!("{:.2}", h))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Time (UTC)",
+        gps_data
+            .fix
+            .time
+            .map(|t| t.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+    lines.push(data_row(
+        "Date",
+        gps_data
+            .fix
+            .date
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+
+    // ── HEADING / ACCURACY ───────────────────────────────────────────────
+    if gps_data.navigation.true_heading.is_some()
+        || gps_data.navigation.heading_rate.is_some()
+        || gps_data.navigation.position_accuracy.is_some()
+    {
+        lines.push(Line::default());
+        lines.push(section_line("HEADING / ACCURACY"));
+        if let Some(h) = gps_data.navigation.true_heading {
+            lines.push(data_row("True hdg", format!("{:.1}°", h)));
+        }
+        if let Some(r) = gps_data.navigation.heading_rate {
+            lines.push(data_row("Hdg rate", format!("{:.1}°/s", r)));
+        }
+        if let Some(a) = gps_data.navigation.position_accuracy {
+            lines.push(data_row("Pos acc", format!("{:.1} m", a)));
+        }
+    }
+
+    Paragraph::new(lines).block(block)
+}
+
+// ---------------------------------------------------------------------------
+// Satellite widgets (preserved, lightly restyled)
+// ---------------------------------------------------------------------------
 
 /// Create satellite list widget
 pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
     let satellites_by_system = gps_data.satellites_by_system();
-
     let mut items = Vec::new();
 
-    // Add header
     items.push(ListItem::new(Line::from(vec![
-        Span::styled("PRN ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("El  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("Az  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("SNR ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("Sys", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "PRN  ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "El   ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Az   ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "SNR  ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Sys",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     ])));
 
-    // Group by system (already sorted)
     for (system, sats) in satellites_by_system.iter() {
         let system_color = match system {
             GnssSystem::Gps => Color::Green,
@@ -177,31 +277,32 @@ pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
             GnssSystem::Unknown => Color::Gray,
         };
 
-        // Satellites are already sorted by PRN in satellites_by_system
         for sat in sats.iter() {
-            let prn = format!("{:<4}", sat.prn);
+            let prn = format!("{:<5}", sat.prn);
             let el = sat
                 .elevation
-                .map(|e| format!("{:<4}", e))
-                .unwrap_or_else(|| "N/A ".to_string());
+                .map(|e| format!("{:<5}", e))
+                .unwrap_or_else(|| "—    ".into());
             let az = sat
                 .azimuth
-                .map(|a| format!("{:<4}", a))
-                .unwrap_or_else(|| "N/A ".to_string());
+                .map(|a| format!("{:<5}", a))
+                .unwrap_or_else(|| "—    ".into());
             let snr = sat
                 .snr
-                .map(|s| format!("{:<4}", s))
-                .unwrap_or_else(|| "N/A ".to_string());
-
-            let snr_color = sat.snr.map(|s| {
-                if s >= 40 {
-                    Color::Green
-                } else if s >= 30 {
-                    Color::Yellow
-                } else {
-                    Color::Red
-                }
-            }).unwrap_or(Color::Gray);
+                .map(|s| format!("{:<5}", s))
+                .unwrap_or_else(|| "—    ".into());
+            let snr_color = sat
+                .snr
+                .map(|s| {
+                    if s >= 40 {
+                        Color::Green
+                    } else if s >= 30 {
+                        Color::Yellow
+                    } else {
+                        Color::Red
+                    }
+                })
+                .unwrap_or(Color::Gray);
 
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(prn, Style::default().fg(system_color)),
@@ -214,86 +315,69 @@ pub fn create_satellite_list_widget(gps_data: &GpsData) -> List<'static> {
     }
 
     if items.len() == 1 {
-        items.push(ListItem::new("No satellites in view"));
+        items.push(ListItem::new(Line::from(Span::styled(
+            "No satellites in view",
+            Style::default().fg(Color::DarkGray),
+        ))));
     }
 
     List::new(items).block(
         Block::default()
-            .borders(Borders::ALL)
-            .title("Satellite Details"),
+            .title(" SATELLITE DETAILS ")
+            .borders(Borders::ALL),
     )
 }
 
 /// Create satellite sky chart widget
-pub fn create_satellite_sky_chart(gps_data: &GpsData) -> Canvas<'static, impl Fn(&mut ratatui::widgets::canvas::Context) + 'static> {
+pub fn create_satellite_sky_chart(
+    gps_data: &GpsData,
+) -> Canvas<'static, impl Fn(&mut ratatui::widgets::canvas::Context) + 'static> {
     let satellites = gps_data.satellites.clone();
 
     Canvas::default()
-        .block(Block::default().borders(Borders::ALL).title("Sky View"))
+        .block(Block::default().borders(Borders::ALL).title(" SKY VIEW "))
         .x_bounds([-1.2, 1.2])
         .y_bounds([-1.2, 1.2])
         .paint(move |ctx| {
             use ratatui::widgets::canvas::{Circle, Points};
-            use ratatui::style::Color;
 
-            // Draw elevation circles (90°, 60°, 30°, horizon)
-            let circles = [
-                (0.0, Color::DarkGray),   // Center (zenith)
-                (0.33, Color::DarkGray),  // 60°
-                (0.66, Color::DarkGray),  // 30°
-                (1.0, Color::Gray),       // Horizon
-            ];
-
-            for (radius, color) in circles.iter() {
-                let mut points = Vec::new();
-                for angle in (0..360).step_by(5) {
-                    let rad = (angle as f64) * PI / 180.0;
-                    let x = radius * rad.cos();
-                    let y = radius * rad.sin();
-                    points.push((x, y));
-                }
+            // Draw elevation rings
+            for (radius, color) in &[
+                (0.0_f64, Color::DarkGray),
+                (0.33, Color::DarkGray),
+                (0.66, Color::DarkGray),
+                (1.0, Color::Gray),
+            ] {
+                let pts: Vec<(f64, f64)> = (0..360)
+                    .step_by(5)
+                    .map(|angle| {
+                        let rad = (angle as f64) * PI / 180.0;
+                        (radius * rad.cos(), radius * rad.sin())
+                    })
+                    .collect();
                 ctx.draw(&Points {
-                    coords: &points,
+                    coords: &pts,
                     color: *color,
                 });
             }
 
-            // Draw compass directions using circles at the positions
-            ctx.draw(&Circle {
-                x: 0.0,
-                y: 1.05,
-                radius: 0.02,
-                color: Color::White,
-            });
-            ctx.draw(&Circle {
-                x: 0.0,
-                y: -1.05,
-                radius: 0.02,
-                color: Color::White,
-            });
-            ctx.draw(&Circle {
-                x: 1.05,
-                y: 0.0,
-                radius: 0.02,
-                color: Color::White,
-            });
-            ctx.draw(&Circle {
-                x: -1.05,
-                y: 0.0,
-                radius: 0.02,
-                color: Color::White,
-            });
+            // Cardinal direction dots
+            for (x, y) in &[(0.0, 1.05), (0.0, -1.05), (1.05, 0.0), (-1.05, 0.0)] {
+                ctx.draw(&Circle {
+                    x: *x,
+                    y: *y,
+                    radius: 0.02,
+                    color: Color::White,
+                });
+            }
 
             // Plot satellites
             for sat in satellites.values() {
                 if let (Some(elevation), Some(azimuth)) = (sat.elevation, sat.azimuth) {
-                    // Convert elevation and azimuth to x, y coordinates
                     let radius = 1.0 - (elevation as f64 / 90.0);
                     let azimuth_rad = (azimuth as f64 - 90.0) * PI / 180.0;
-                    
                     let x = radius * azimuth_rad.cos();
                     let y = radius * azimuth_rad.sin();
-
                     let color = match sat.system {
                         GnssSystem::Gps => Color::Green,
                         GnssSystem::Glonass => Color::Blue,
@@ -301,115 +385,25 @@ pub fn create_satellite_sky_chart(gps_data: &GpsData) -> Canvas<'static, impl Fn
                         GnssSystem::Beidou => Color::Magenta,
                         GnssSystem::Unknown => Color::Gray,
                     };
-
-                    // Use different circle sizes based on SNR
-                    let radius = if let Some(snr) = sat.snr {
-                        if snr >= 40 {
-                            0.05 // Large for strong signal
-                        } else if snr >= 30 {
-                            0.03 // Medium
-                        } else {
-                            0.02 // Small for weak
-                        }
-                    } else {
-                        0.01 // Tiny for no signal
-                    };
-
+                    let r = sat
+                        .snr
+                        .map(|s| {
+                            if s >= 40 {
+                                0.05
+                            } else if s >= 30 {
+                                0.03
+                            } else {
+                                0.02
+                            }
+                        })
+                        .unwrap_or(0.01);
                     ctx.draw(&Circle {
                         x,
                         y,
-                        radius,
+                        radius: r,
                         color,
                     });
                 }
             }
         })
-}
-
-/// Create telemetry widget showing racing metrics
-pub fn create_telemetry_widget(gps_data: &GpsData) -> Paragraph<'static> {
-    // Show available data from navigation
-    let speed_knots = gps_data
-        .navigation
-        .speed_knots
-        .map(|v| format!("{:.1} kts", v))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let heading_rate = gps_data
-        .navigation
-        .heading_rate
-        .map(|v| format!("{:.1}°/s", v))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let true_heading = gps_data
-        .navigation
-        .true_heading
-        .map(|v| format!("{:.1}°", v))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let accuracy = gps_data
-        .navigation
-        .position_accuracy
-        .map(|v| format!("{:.1} m", v))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    let text = vec![
-        Line::from(vec![
-            Span::styled("Speed (kts):", Style::default().fg(Color::Cyan)),
-            Span::raw(format!(" {}", speed_knots)),
-        ]),
-        Line::from(vec![
-            Span::styled("Head Rate: ", Style::default().fg(Color::Cyan)),
-            Span::raw(format!(" {}", heading_rate)),
-        ]),
-        Line::from(vec![
-            Span::styled("True Head: ", Style::default().fg(Color::Cyan)),
-            Span::raw(format!(" {}", true_heading)),
-        ]),
-        Line::from(vec![
-            Span::styled("Accuracy:  ", Style::default().fg(Color::Cyan)),
-            Span::raw(format!(" {}", accuracy)),
-        ]),
-    ];
-
-    Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("📊 Advanced Data"),
-    )
-}
-
-/// Create connection status widget
-pub fn create_connection_widget(state: &crate::models::AppState) -> Paragraph<'static> {
-    use crate::models::MqttStatus;
-
-    let mqtt_status = match state.mqtt_status {
-        MqttStatus::Connected => ("✓ Connected", Color::Green),
-        MqttStatus::Connecting => ("⟳ Connecting", Color::Yellow),
-        MqttStatus::Disconnected => ("✗ Disconnected", Color::Red),
-        MqttStatus::Error => ("✗ Error", Color::Red),
-    };
-
-    let serial_status = if state.serial_connected {
-        ("✓ Connected", Color::Green)
-    } else {
-        ("✗ Disconnected", Color::Red)
-    };
-
-    let text = vec![
-        Line::from(vec![
-            Span::styled("MQTT:   ", Style::default().fg(Color::Cyan)),
-            Span::styled(mqtt_status.0, Style::default().fg(mqtt_status.1)),
-        ]),
-        Line::from(vec![
-            Span::styled("Serial: ", Style::default().fg(Color::Cyan)),
-            Span::styled(serial_status.0, Style::default().fg(serial_status.1)),
-        ]),
-    ];
-
-    Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("🔌 Connections"),
-    )
 }

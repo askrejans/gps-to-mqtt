@@ -10,176 +10,122 @@ mod track;
 mod ui;
 
 use anyhow::Result;
-use clap::Parser;
 use config::load_configuration;
-use models::{AppMode, AppState, GpsData, MqttStatus};
+use gumdrop::Options;
+use logging::TuiWriter;
+use models::{AppState, GpsData, MqttStatus};
 use parser::GpsEvent;
-use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::{RwLock, mpsc};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-/// GPS to MQTT bridge application
-#[derive(Parser, Debug)]
-#[command(name = "gps-to-mqtt")]
-#[command(about = "GPS to MQTT bridge", long_about = None)]
-struct Args {
-    /// Application mode: tui, cli, or service
-    #[arg(short, long, value_enum, default_value = "tui")]
-    mode: CliMode,
+#[derive(Debug, Options)]
+struct Opts {
+    #[options(help = "print help message")]
+    help: bool,
 
-    /// Path to configuration file
-    #[arg(short, long)]
+    #[options(short = "c", help = "path to configuration file")]
     config: Option<String>,
-
-    /// Log level (trace, debug, info, warn, error)
-    #[arg(short, long)]
-    log_level: Option<String>,
-}
-
-#[derive(Debug, Clone, clap::ValueEnum)]
-enum CliMode {
-    Tui,
-    Cli,
-    Service,
-}
-
-impl From<CliMode> for AppMode {
-    fn from(mode: CliMode) -> Self {
-        match mode {
-            CliMode::Tui => AppMode::Tui,
-            CliMode::Cli => AppMode::Cli,
-            CliMode::Service => AppMode::Service,
-        }
-    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Parse command-line arguments
-    let args = Args::parse();
-    let mode: AppMode = args.mode.into();
+    let opts = Opts::parse_args_default_or_exit();
 
-    // Load configuration
-    let mut config = load_configuration(args.config.as_deref(), mode)?;
+    let config = load_configuration(opts.config.as_deref())?;
 
-    // Override log level if specified
-    if let Some(log_level) = args.log_level {
-        config.log_level = log_level;
-    }
+    let is_tty = atty::is(atty::Stream::Stdout);
 
-    // Display welcome message for TUI and CLI modes BEFORE logging init
-    if matches!(config.mode, AppMode::Tui | AppMode::Cli) {
+    let cancel = CancellationToken::new();
+
+    // Initialise logging — TUI mode captures logs into a ring buffer shown in the UI;
+    // service / daemon mode writes structured logs to stdout.
+    let log_buffer: Option<Arc<Mutex<VecDeque<String>>>> = if is_tty {
+        let buf = Arc::new(Mutex::new(VecDeque::<String>::with_capacity(
+            config.max_log_buffer_size,
+        )));
+        logging::init_logging_tui(&config, TuiWriter::new(Arc::clone(&buf)));
+        Some(buf)
+    } else {
         display_welcome();
-    }
+        logging::init_logging_service(&config);
+        None
+    };
 
-    // Run the application based on mode
-    if let Err(e) = match config.mode {
-        AppMode::Tui => run_tui_application(config).await,
-        _ => run_standard_application(config).await,
-    } {
-        error!("Application error: {}", e);
-        std::process::exit(1);
-    }
+    info!("Starting GPS-to-MQTT v{}", env!("CARGO_PKG_VERSION"));
 
-    Ok(())
-}
+    // Shared application state
+    let app_state = Arc::new(RwLock::new(AppState {
+        mqtt_enabled: config.mqtt_enabled,
+        connection_address: config.connection_display(),
+        mqtt_address: if config.mqtt_enabled {
+            config.mqtt_address()
+        } else {
+            String::new()
+        },
+        ..AppState::default()
+    }));
 
-/// Run application in TUI mode with log buffer
-async fn run_tui_application(config: config::AppConfig) -> Result<()> {
-    // Create log buffer and initialize logging with it
-    let log_buffer = Arc::new(RwLock::new(Vec::<String>::new()));
-    logging::init_logging_with_buffer(&config, Some(log_buffer.clone()))?;
-    
-    info!("Starting GPS to MQTT application in TUI mode");
-    
-    // Create shared application state
-    let app_state = Arc::new(RwLock::new(AppState::new()));
-
-    // Create channels for communication between tasks
+    // Channels
     let (gps_event_tx, gps_event_rx) = mpsc::channel::<GpsEvent>(100);
     let (gps_data_tx, gps_data_rx) = mpsc::channel::<GpsData>(10);
     let (mqtt_status_tx, mqtt_status_rx) = mpsc::channel::<MqttStatus>(10);
 
-    // Spawn GPS event processing task
-    let state_clone = app_state.clone();
-    let data_tx_clone = gps_data_tx.clone();
-    tokio::spawn(async move {
-        process_gps_events(gps_event_rx, state_clone, data_tx_clone).await;
-    });
-
-    // Spawn MQTT status update task
-    let state_clone = app_state.clone();
-    tokio::spawn(async move {
-        update_mqtt_status(mqtt_status_rx, state_clone).await;
-    });
-
-    // Start serial port reading
-    serial::spawn_serial_task(config.clone(), gps_event_tx).await?;
-    info!("Serial port task started");
-
-    // Start MQTT client
-    mqtt::spawn_mqtt_task(config.clone(), gps_data_rx, mqtt_status_tx).await?;
-    info!("MQTT task started");
-
-    // Run TUI interface
-    let tui_app = ui::TuiApp::new(app_state, log_buffer);
-    tui_app.run(config).await?;
-    
-    info!("Application shutdown complete");
-    Ok(())
-}
-
-/// Run application in CLI or Service mode
-async fn run_standard_application(config: config::AppConfig) -> Result<()> {
-    // Initialize logging normally (to stdout/file)
-    logging::init_logging(&config)?;
-    
-    info!("Starting GPS to MQTT application in {:?} mode", config.mode);
-
-    // Create shared application state
-    let app_state = Arc::new(RwLock::new(AppState::new()));
-
-    // Create channels for communication between tasks
-    let (gps_event_tx, gps_event_rx) = mpsc::channel::<GpsEvent>(100);
-    let (gps_data_tx, gps_data_rx) = mpsc::channel::<GpsData>(10);
-    let (mqtt_status_tx, mqtt_status_rx) = mpsc::channel::<MqttStatus>(10);
-
-    // Spawn GPS event processing task
-    let state_clone = app_state.clone();
-    let data_tx_clone = gps_data_tx.clone();
-    tokio::spawn(async move {
-        process_gps_events(gps_event_rx, state_clone, data_tx_clone).await;
-    });
-
-    // Spawn MQTT status update task
-    let state_clone = app_state.clone();
-    tokio::spawn(async move {
-        update_mqtt_status(mqtt_status_rx, state_clone).await;
-    });
-
-    // Start serial port reading
-    serial::spawn_serial_task(config.clone(), gps_event_tx).await?;
-    info!("Serial port task started");
-
-    // Start MQTT client
-    mqtt::spawn_mqtt_task(config.clone(), gps_data_rx, mqtt_status_tx).await?;
-    info!("MQTT task started");
-
-    // Run mode-specific interface
-    match config.mode {
-        AppMode::Cli => {
-            info!("Running in CLI mode. Press Ctrl+C to quit.");
-            service::wait_for_shutdown_signal().await;
-        }
-        AppMode::Service => {
-            info!("Running in service mode");
-            service::wait_for_shutdown_signal().await;
-        }
-        _ => {
-            error!("Invalid mode for run_standard_application");
-        }
+    // GPS event → state + forward to MQTT
+    {
+        let state = Arc::clone(&app_state);
+        tokio::spawn(async move {
+            process_gps_events(gps_event_rx, state, gps_data_tx).await;
+        });
     }
-    
+
+    // MQTT status → state
+    {
+        let state = Arc::clone(&app_state);
+        tokio::spawn(async move {
+            update_mqtt_status(mqtt_status_rx, state).await;
+        });
+    }
+
+    // Start serial port
+    serial::spawn_serial_task(config.clone(), gps_event_tx).await?;
+    info!("Serial port task started");
+
+    // Start MQTT client (optional)
+    if config.mqtt_enabled {
+        mqtt::spawn_mqtt_task(config.clone(), gps_data_rx, mqtt_status_tx).await?;
+        info!("MQTT task started");
+    } else {
+        info!("MQTT disabled — running in display-only mode");
+        // Drop unused sender so the channel cleanly closes
+        drop(gps_data_rx);
+        drop(mqtt_status_tx);
+    }
+
+    // Spawn signal listener — cancels the token on SIGTERM / Ctrl+C
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            service::wait_for_shutdown_signal().await;
+            c.cancel();
+        });
+    }
+
+    // Wait: TUI blocks until quit; service mode waits for the cancel token
+    if is_tty {
+        let buf = log_buffer.expect("log_buffer is Some in TUI mode");
+        if let Err(e) = ui::run_tui(Arc::clone(&app_state), buf, cancel.clone()).await {
+            error!("TUI error: {}", e);
+        }
+        cancel.cancel();
+    } else {
+        cancel.cancelled().await;
+    }
+
     info!("Application shutdown complete");
     Ok(())
 }
@@ -199,7 +145,6 @@ async fn process_gps_events(
                 state_guard.serial_connected = true;
             }
             GpsEvent::NavigationUpdate(nav) => {
-                // Merge navigation data
                 if nav.latitude.is_some() {
                     state_guard.gps_data.navigation.latitude = nav.latitude;
                 }
@@ -222,7 +167,6 @@ async fn process_gps_events(
                 state_guard.serial_connected = true;
             }
             GpsEvent::FixUpdate(fix) => {
-                // Merge fix data
                 if fix.fix_type.is_some() {
                     state_guard.gps_data.fix.fix_type = fix.fix_type;
                 }
@@ -258,16 +202,17 @@ async fn process_gps_events(
                 state_guard.gps_data.add_raw_nmea(sentence);
                 state_guard.serial_connected = true;
             }
-            GpsEvent::AccuracyUpdate { std_lat, std_lon, std_alt: _ } => {
-                // Calculate overall position accuracy and store in navigation data
+            GpsEvent::AccuracyUpdate {
+                std_lat,
+                std_lon,
+                std_alt: _,
+            } => {
                 let position_accuracy = (std_lat * std_lat + std_lon * std_lon).sqrt();
                 state_guard.gps_data.navigation.position_accuracy = Some(position_accuracy);
                 state_guard.gps_data.last_update = Some(std::time::Instant::now());
                 state_guard.serial_connected = true;
             }
             GpsEvent::RateOfTurn(_rate) => {
-                // Rate of turn data parsed but not currently used for calculations
-                // Available for future enhancements
                 state_guard.gps_data.last_update = Some(std::time::Instant::now());
                 state_guard.serial_connected = true;
             }
@@ -278,10 +223,9 @@ async fn process_gps_events(
             }
         }
 
-        // Update satellite count
-        state_guard.gps_data.satellites_in_view = Some(state_guard.gps_data.satellites.len() as u32);
+        state_guard.gps_data.satellites_in_view =
+            Some(state_guard.gps_data.satellites.len() as u32);
 
-        // Send updated GPS data to MQTT publisher
         if let Err(e) = data_tx.send(state_guard.gps_data.clone()).await {
             warn!("Failed to send GPS data to MQTT publisher: {}", e);
         }
@@ -298,17 +242,12 @@ async fn update_mqtt_status(
     while let Some(status) = status_rx.recv().await {
         let mut state_guard = state.write().await;
         state_guard.mqtt_status = status;
-        info!("MQTT status changed to: {:?}", status);
+        info!("MQTT status: {:?}", status);
     }
 }
 
-/// Display welcome message
 fn display_welcome() {
     println!("\n╔═══════════════════════════════════════════╗");
-    println!("║     GPS to MQTT Bridge                    ║");
-    println!("╚═══════════════════════════════════════════╝");
-    println!();
-    println!("📡 Connecting to GPS receiver...");
-    println!("🌐 Establishing MQTT connection...");
-    println!();
+    println!("║        GPS to MQTT Bridge                 ║");
+    println!("╚═══════════════════════════════════════════╝\n");
 }

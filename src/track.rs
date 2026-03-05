@@ -20,7 +20,7 @@ impl LapDetector {
     pub fn new(config: TrackConfig) -> Self {
         let sector_count = config.sectors.len();
         let is_learning = config.mode == TrackConfigMode::Learn;
-        
+
         Self {
             config,
             lap_data: LapData::default(),
@@ -36,7 +36,7 @@ impl LapDetector {
     /// Update with new GPS position and return lap data if changed
     pub fn update(&mut self, latitude: f64, longitude: f64) -> Option<LapData> {
         let position = (latitude, longitude);
-        
+
         // Handle learning mode
         if self.is_learning {
             return self.handle_learning_mode(position);
@@ -63,9 +63,9 @@ impl LapDetector {
                 // Calculate lap time
                 let lap_duration = now.duration_since(last_lap_time);
                 let lap_time_ms = lap_duration.as_millis() as u64;
-                
+
                 self.lap_data.lap_time_ms = Some(lap_time_ms);
-                
+
                 // Update best lap if this is faster
                 if let Some(best) = self.lap_data.best_lap_ms {
                     if lap_time_ms < best {
@@ -75,22 +75,22 @@ impl LapDetector {
                 } else {
                     self.lap_data.best_lap_ms = Some(lap_time_ms);
                 }
-                
+
                 info!(
                     "Lap {} completed in {:.3}s",
                     self.lap_data.lap_number,
                     lap_time_ms as f64 / 1000.0
                 );
-                
+
                 lap_changed = true;
             }
-            
+
             // Start new lap
             self.lap_data.lap_number += 1;
             self.lap_data.current_lap_start_ms = Some(now.elapsed().as_millis() as u64);
             self.last_lap_timestamp = Some(now);
             self.sector_states.iter_mut().for_each(|s| *s = false); // Reset sector states
-            
+
             debug!("Starting lap {}", self.lap_data.lap_number);
         }
 
@@ -156,7 +156,7 @@ impl LapDetector {
         self.is_learning = false;
         self.config.mode = TrackConfigMode::Manual; // Switch to normal mode
         self.lap_data = LapData::default(); // Reset lap data
-        
+
         Ok(())
     }
 
@@ -207,7 +207,12 @@ impl LapDetector {
                     radius_meters: 10.0,
                     name: format!("Point {}", self.config.learned_track.len()),
                 });
-                debug!("Recorded point {} at ({}, {})", self.config.learned_track.len(), lat, lon);
+                debug!(
+                    "Recorded point {} at ({}, {})",
+                    self.config.learned_track.len(),
+                    lat,
+                    lon
+                );
             }
         }
 
@@ -215,7 +220,10 @@ impl LapDetector {
         if let Some(start) = self.learning_start_position {
             let distance_to_start = calculate_distance(start.0, start.1, lat, lon);
             if distance_to_start < 20.0 && self.config.learned_track.len() > 10 {
-                info!("Lap complete! Recorded {} points", self.config.learned_track.len());
+                info!(
+                    "Lap complete! Recorded {} points",
+                    self.config.learned_track.len()
+                );
                 // Don't automatically stop - let user decide when to stop learning
             }
         }
@@ -234,14 +242,18 @@ impl LapDetector {
             if in_sector && !self.sector_states[i] {
                 if let Some(start_time) = self.last_lap_timestamp {
                     let sector_time = Instant::now().duration_since(start_time).as_millis() as u64;
-                    
+
                     // Ensure we have enough space in the sector times vector
                     while self.lap_data.sector_times_ms.len() <= i {
                         self.lap_data.sector_times_ms.push(None);
                     }
-                    
+
                     self.lap_data.sector_times_ms[i] = Some(sector_time);
-                    info!("Sector {} crossed at {:.3}s", i + 1, sector_time as f64 / 1000.0);
+                    info!(
+                        "Sector {} crossed at {:.3}s",
+                        i + 1,
+                        sector_time as f64 / 1000.0
+                    );
                     changed = true;
                 }
             }
@@ -271,7 +283,7 @@ fn calculate_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 
     let a = (delta_lat / 2.0).sin() * (delta_lat / 2.0).sin()
         + lat1_rad.cos() * lat2_rad.cos() * (delta_lon / 2.0).sin() * (delta_lon / 2.0).sin();
-    
+
     let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
 
     EARTH_RADIUS * c
@@ -369,5 +381,60 @@ mod tests {
         // Test distance between two known points
         let distance = calculate_distance(0.0, 0.0, 0.001, 0.001);
         assert!(distance > 100.0 && distance < 200.0); // Should be ~157 meters
+    }
+
+    #[test]
+    fn test_geofence_same_point_is_inside() {
+        let point = TrackPoint {
+            latitude: 51.5074,
+            longitude: -0.1278,
+            radius_meters: 10.0,
+            name: "London".into(),
+        };
+        assert!(is_in_geofence(51.5074, -0.1278, &point));
+    }
+
+    #[test]
+    fn test_geofence_far_point_is_outside() {
+        let point = TrackPoint {
+            latitude: 40.7128,
+            longitude: -74.0060,
+            radius_meters: 10.0,
+            name: "NYC".into(),
+        };
+        // ~111 m away — well outside 10 m radius
+        assert!(!is_in_geofence(40.7138, -74.0060, &point));
+    }
+
+    #[test]
+    fn test_lap_detector_no_start_finish_returns_none() {
+        // Disabled config with no start_finish — update must return None
+        let config = TrackConfig::default();
+        let mut detector = LapDetector::new(config);
+        assert!(detector.update(40.7128, -74.0060).is_none());
+    }
+
+    #[test]
+    fn test_gpx_empty_file_returns_err() {
+        let gpx = r#"<gpx><trk><trkseg></trkseg></trk></gpx>"#;
+        assert!(parse_gpx_file(gpx).is_err());
+    }
+
+    #[test]
+    fn test_gpx_parses_track_points() {
+        let gpx = r#"<gpx><trk><trkseg>
+  <trkpt lat="40.7128" lon="-74.0060"></trkpt>
+  <trkpt lat="40.7129" lon="-74.0061"></trkpt>
+</trkseg></trk></gpx>"#;
+        let points = parse_gpx_file(gpx).unwrap();
+        assert_eq!(points.len(), 2);
+        assert!((points[0].latitude - 40.7128).abs() < 1e-6);
+        assert!((points[0].longitude - (-74.0060)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_haversine_one_degree_lat_approx_111km() {
+        let distance = calculate_distance(0.0, 0.0, 1.0, 0.0);
+        assert!((distance - 111_195.0).abs() < 200.0);
     }
 }

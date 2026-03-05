@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::parser::{parse_nmea_sentence, GpsEvent};
+use crate::parser::{GpsEvent, parse_nmea_sentence};
 use anyhow::{Context, Result};
 use serialport::SerialPort;
 use std::io::Read;
@@ -17,17 +17,12 @@ const UBX_10HZ_COMMAND: &[u8] = &[
 ];
 
 /// Spawn the serial port reading task
-pub async fn spawn_serial_task(
-    config: AppConfig,
-    event_tx: mpsc::Sender<GpsEvent>,
-) -> Result<()> {
+pub async fn spawn_serial_task(config: AppConfig, event_tx: mpsc::Sender<GpsEvent>) -> Result<()> {
     let port_name = config.port_name.clone();
     let baud_rate = config.baud_rate;
     let set_10hz = config.set_gps_to_10hz;
 
-    tokio::task::spawn_blocking(move || {
-        run_serial_loop(&port_name, baud_rate, set_10hz, event_tx)
-    });
+    tokio::task::spawn_blocking(move || run_serial_loop(&port_name, baud_rate, set_10hz, event_tx));
 
     Ok(())
 }
@@ -76,9 +71,7 @@ fn run_serial_loop(
 
         // Determine reconnection delay based on error count
         let delay = if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-            warn!(
-                "Max consecutive errors reached, using extended backoff delay"
-            );
+            warn!("Max consecutive errors reached, using extended backoff delay");
             ERROR_BACKOFF_DELAY
         } else {
             RECONNECT_DELAY
@@ -106,22 +99,19 @@ fn open_serial_port(port_name: &str, baud_rate: u32) -> Result<Box<dyn SerialPor
 /// Configure GPS to 10Hz update rate (u-blox specific)
 fn configure_10hz(port: &mut Box<dyn SerialPort>) -> Result<()> {
     info!("Configuring GPS for 10Hz update rate");
-    
+
     use std::io::Write;
     port.write_all(UBX_10HZ_COMMAND)
         .context("Failed to write 10Hz command")?;
-    
+
     port.flush().context("Failed to flush serial port")?;
-    
+
     info!("10Hz configuration sent");
     Ok(())
 }
 
 /// Read NMEA sentences from the serial port and send events
-fn read_from_port(
-    port: &mut Box<dyn SerialPort>,
-    event_tx: &mpsc::Sender<GpsEvent>,
-) -> Result<()> {
+fn read_from_port(port: &mut Box<dyn SerialPort>, event_tx: &mpsc::Sender<GpsEvent>) -> Result<()> {
     let mut buffer = Vec::new();
     let mut temp_buf = [0u8; 1024]; // Increased buffer size
     let mut timeout_count = 0;
@@ -132,7 +122,10 @@ fn read_from_port(
     loop {
         // Log statistics every 30 seconds
         if last_log_time.elapsed() > Duration::from_secs(30) {
-            info!("Serial port stats: {} NMEA sentences received in last 30s", sentences_received);
+            info!(
+                "Serial port stats: {} NMEA sentences received in last 30s",
+                sentences_received
+            );
             sentences_received = 0;
             last_log_time = std::time::Instant::now();
         }
@@ -152,32 +145,32 @@ fn read_from_port(
             Ok(n) => {
                 // Reset timeout counter on successful read
                 timeout_count = 0;
-                
+
                 // Append received bytes to buffer
                 buffer.extend_from_slice(&temp_buf[..n]);
-                
+
                 // Process complete lines from buffer
                 while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
                     // Extract line (including the newline)
                     let line_bytes: Vec<u8> = buffer.drain(..=newline_pos).collect();
-                    
+
                     // Try to convert to UTF-8, skip if invalid
                     match String::from_utf8(line_bytes) {
                         Ok(line) => {
                             let trimmed = line.trim();
-                            
+
                             // Only process NMEA sentences
                             if trimmed.starts_with('$') && trimmed.contains('*') {
                                 sentences_received += 1;
                                 debug!("Received: {}", trimmed);
-                                
+
                                 // Send raw NMEA sentence first
                                 let raw_event = GpsEvent::RawNmea(trimmed.to_string());
                                 if let Err(e) = event_tx.blocking_send(raw_event) {
                                     error!("Failed to send raw NMEA: {}", e);
                                     return Err(anyhow::anyhow!("Event channel closed"));
                                 }
-                                
+
                                 // Parse the sentence
                                 match parse_nmea_sentence(trimmed) {
                                     Ok(events) => {
@@ -185,7 +178,9 @@ fn read_from_port(
                                             // Send events to the processing task
                                             if let Err(e) = event_tx.blocking_send(event) {
                                                 error!("Failed to send GPS event: {}", e);
-                                                return Err(anyhow::anyhow!("Event channel closed"));
+                                                return Err(anyhow::anyhow!(
+                                                    "Event channel closed"
+                                                ));
                                             }
                                         }
                                     }
@@ -201,7 +196,7 @@ fn read_from_port(
                         }
                     }
                 }
-                
+
                 // Keep buffer size reasonable - if it gets too large without finding a newline,
                 // something is wrong, so discard old data
                 if buffer.len() > 4096 {

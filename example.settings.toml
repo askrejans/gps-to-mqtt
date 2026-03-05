@@ -1,32 +1,56 @@
-# GPS to MQTT Configuration File
+# GPS to MQTT — settings.toml
+#
+# All values shown here are the built-in defaults.
+# Only override what you need to change.
+#
+# Environment variables (highest priority):
+#   GPS_TO_MQTT_PORT_NAME, GPS_TO_MQTT_BAUD_RATE, GPS_TO_MQTT_MQTT_HOST, …
 
-# Serial Port Configuration
+# ---------------------------------------------------------------------------
+# Serial port
+# ---------------------------------------------------------------------------
 port_name = "/dev/ttyACM0"
-baud_rate = 9600
+baud_rate  = 9600
 set_gps_to_10hz = false
 
-# MQTT Configuration
-mqtt_host = "localhost"
-mqtt_port = 1883
-mqtt_client_id = "gps-to-mqtt"
+# ---------------------------------------------------------------------------
+# MQTT
+# ---------------------------------------------------------------------------
+mqtt_enabled = true                 # set to false for display-only / no MQTT
+mqtt_host    = "localhost"
+mqtt_port    = 1883
+# mqtt_client_id = "gps-to-mqtt"   # auto-generated when absent
 mqtt_base_topic = "/GOLF86/GPS"
-mqtt_reconnect_max_attempts = 0  # 0 = infinite retries
+mqtt_reconnect_max_attempts = 0     # 0 = infinite retries
 
-# Logging Configuration
-log_level = "info"  # trace, debug, info, warn, error
-log_file_path = "/var/log/gps-to-mqtt/gps-to-mqtt.log"  # Optional, for service mode
+# Optional authentication
+# mqtt_username = ""
+# mqtt_password = ""
+# mqtt_use_tls  = false
 
-# TUI Configuration
-tui_refresh_rate_ms = 100  # Refresh rate in milliseconds
-max_log_buffer_size = 1000  # Maximum number of log entries to keep in TUI
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+log_level = "info"   # trace | debug | info | warn | error
+log_json  = false     # true = JSON structured logs (useful for log aggregators)
 
-# Telemetry Configuration
-telemetry_enabled = true  # Enable telemetry calculations (acceleration, g-forces, etc.)
-telemetry_smoothing_window = 3  # Number of samples for moving average smoothing
+# ---------------------------------------------------------------------------
+# TUI
+# ---------------------------------------------------------------------------
+tui_refresh_rate_ms  = 100
+max_log_buffer_size  = 1000
 
-# Track/Lap Timing Configuration
-track_mode = "disabled"  # Options: "disabled", "manual", "learn", "gpx"
-# track_start_lat = 40.7128  # Start/Finish latitude (for manual mode)
-# track_start_lon = -74.0060  # Start/Finish longitude (for manual mode)
-track_geofence_radius = 15.0  # Geofence radius in meters for start/finish line
-# track_gpx_file = "/path/to/track.gpx"  # GPX file path (for gpx mode)
+# ---------------------------------------------------------------------------
+# Telemetry
+# ---------------------------------------------------------------------------
+telemetry_enabled          = true
+telemetry_smoothing_window = 3
+
+# ---------------------------------------------------------------------------
+# Track / lap timing
+# ---------------------------------------------------------------------------
+track_mode = "disabled"   # disabled | manual | learn | gpx
+# track_start_lat      = 40.7128
+# track_start_lon      = -74.0060
+track_geofence_radius = 15.0
+# track_gpx_file = "/path/to/track.gpx"
