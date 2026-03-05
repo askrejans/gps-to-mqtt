@@ -235,52 +235,76 @@ All settings can be overridden via `GPS_TO_MQTT_*` environment variables
 
 ## MQTT Topics
 
-Data is published to the following topics (with configurable base):
+All topics are published under the configurable `mqtt_base_topic` prefix (default `/GOLF86/GPS`).  
+Only values that have changed are republished (retained, QoS 0).
 
-### Core GPS Data
-- `{base_topic}/LAT` - Latitude (decimal degrees)
-- `{base_topic}/LNG` - Longitude (decimal degrees)
-- `{base_topic}/ALT` - Altitude (meters)
-- `{base_topic}/SPD` - Speed (km/h, primary)
-- `{base_topic}/SPD_KPH` - Speed (km/h)
-- `{base_topic}/SPD_KTS` - Speed (knots)
-- `{base_topic}/CRS` - Course/heading (degrees)
-- `{base_topic}/SATS` - Satellites used in fix
-- `{base_topic}/SAT/GLOBAL/NUM` - Total satellites in view
-- `{base_topic}/HDOP` - Horizontal dilution of precision
-- `{base_topic}/VDOP` - Vertical dilution of precision
-- `{base_topic}/PDOP` - Position dilution of precision
-- `{base_topic}/TME` - GPS time (HH:MM:SS)
-- `{base_topic}/DTE` - GPS date (DD.MM.YYYY)
-- `{base_topic}/QTY` - Fix quality (0=Invalid, 1=GPS, 2=DGPS, 3=PPS, 4=RTK, 5=Float RTK, 6=Estimated, 7=Manual, 8=Simulation)
+### Position
 
-### Satellite Data
-- `{base_topic}/SAT/VEHICLES/{prn}` - Individual satellite info (PRN, Type, Elevation, Azimuth, SNR, In View status)
-- `{base_topic}/SAT/GLOBAL/ANTSTATUS` - Antenna status
-- `{base_topic}/SAT/GLOBAL/PF` - Position fix
-- `{base_topic}/SAT/GLOBAL/GNSS_OTP` - GNSS OTP status
+| Topic | Unit | Notes |
+|-------|------|-------|
+| `/LAT` | decimal degrees | Latitude |
+| `/LNG` | decimal degrees | Longitude |
+| `/ALT` | metres | Altitude above sea level |
+| `/ALT_FT` | feet | Altitude above sea level |
 
-### Telemetry Data (Racing Features)
-- `{base_topic}/ACCELERATION` - Longitudinal acceleration (m/s²)
-- `{base_topic}/LATERAL_G` - Lateral g-force (cornering)
-- `{base_topic}/COMBINED_G` - Total g-force magnitude
-- `{base_topic}/HEADING_RATE` - Rate of heading change (deg/s)
-- `{base_topic}/DISTANCE` - Total distance traveled (meters)
-- `{base_topic}/MAX_SPEED` - Maximum speed recorded (km/h)
-- `{base_topic}/BRAKING` - Braking status (0/1)
+### Speed & Course
 
-### Lap Timing Data
-- `{base_topic}/LAP_NUMBER` - Current lap number
-- `{base_topic}/LAP_TIME` - Last lap time (seconds)
-- `{base_topic}/BEST_LAP` - Best lap time (seconds)
-- `{base_topic}/SECTOR_1`, `/SECTOR_2`, etc. - Sector times (seconds)
+| Topic | Unit | Notes |
+|-------|------|-------|
+| `/SPD` | km/h | Speed (alias for `/SPD_KPH`) |
+| `/SPD_KPH` | km/h | Speed over ground |
+| `/SPD_MPH` | mph | Speed over ground |
+| `/SPD_KTS` | knots | Speed over ground |
+| `/CRS` | degrees | Course over ground — suppressed below 3 km/h |
 
-### Position Accuracy (Advanced)
-- `{base_topic}/POSITION_ACCURACY` - Overall position accuracy (meters)
-- `{base_topic}/TRUE_HEADING` - True heading (degrees)
-- `{base_topic}/HEADING_RATE_GPS` - Heading rate from GPS (deg/s)
+### Fix & Satellite Quality
 
-All messages are published with QoS 0 and retained flag for last known values.
+| Topic | Unit / Values | Notes |
+|-------|--------------|-------|
+| `/SATS` | integer | Satellites used in current fix |
+| `/SAT/GLOBAL/NUM` | integer | Total satellites tracked |
+| `/HDOP` | — | Horizontal dilution of precision |
+| `/VDOP` | — | Vertical dilution of precision |
+| `/PDOP` | — | Position dilution of precision |
+| `/QTY` | 0–8 | Fix quality: 0=Invalid, 1=GPS, 2=DGPS, 3=PPS, 4=RTK, 5=Float RTK, 6=Estimated, 7=Manual, 8=Simulation |
+| `/TME` | HH:MM:SS | GPS UTC time |
+| `/DTE` | DD.MM.YYYY | GPS UTC date |
+| `/POSITION_ACCURACY` | metres | 2D position accuracy (from GST) |
+| `/TRUE_HEADING` | degrees | True heading (from HDT) |
+| `/HEADING_RATE_GPS` | deg/s | Heading rate from GPS ROT sentence |
+
+### Per-Satellite
+
+| Topic | Format | Notes |
+|-------|--------|-------|
+| `/SAT/VEHICLES/{prn}` | text | `PRN: N, Type: X, Elevation: N, Azimuth: N, SNR: N, In View: true/false` |
+
+### Telemetry  *(requires `telemetry_enabled = true`)*
+
+Derived values are always published; zero is used when speed is below the 3 km/h noise threshold.
+
+| Topic | Unit | Notes |
+|-------|------|-------|
+| `/ACCEL_LONG_MPS2` | m/s² | Longitudinal acceleration |
+| `/ACCEL_LONG_G` | g | Longitudinal acceleration |
+| `/ACCEL_LAT_MPS2` | m/s² | Lateral (centripetal) acceleration |
+| `/ACCEL_LAT_G` | g | Lateral acceleration |
+| `/COMBINED_G` | g | √(long_g² + lat_g²) total g-load |
+| `/HEADING_RATE` | deg/s | Yaw rate (ROT preferred, course-diff fallback) |
+| `/DISTANCE` | metres | Cumulative distance this session |
+| `/MAX_SPEED` | km/h | Session maximum speed |
+| `/MAX_SPEED_MPH` | mph | Session maximum speed |
+| `/BRAKING` | 0 / 1 | 1 when deceleration < −0.5 m/s² |
+
+### Lap Timing  *(requires track mode enabled)*
+
+| Topic | Unit | Notes |
+|-------|------|-------|
+| `/LAP_NUMBER` | integer | Current lap counter |
+| `/LAP_TIME` | seconds | Last completed lap time |
+| `/BEST_LAP` | seconds | Best lap time this session |
+| `/SECTOR_1`, `/SECTOR_2`, … | seconds | Individual sector times |
+
 
 ### Compatibility and Testing
 
