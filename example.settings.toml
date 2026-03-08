@@ -4,14 +4,45 @@
 # Only override what you need to change.
 #
 # Environment variables (highest priority):
-#   GPS_TO_MQTT_PORT_NAME, GPS_TO_MQTT_BAUD_RATE, GPS_TO_MQTT_MQTT_HOST, …
+#   GPS_TO_MQTT_CONNECTION_TYPE, GPS_TO_MQTT_PORT_NAME, GPS_TO_MQTT_BAUD_RATE,
+#   GPS_TO_MQTT_TCP_HOST, GPS_TO_MQTT_TCP_PORT, GPS_TO_MQTT_MQTT_HOST, …
 
 # ---------------------------------------------------------------------------
-# Serial port
+# Connection type
+# ---------------------------------------------------------------------------
+# Choose how to receive GPS data:
+#   serial  — directly attached USB/UART GPS device (default)
+#   tcp     — network bridge, e.g. https://github.com/askrejans/io-to-net
+connection_type = "serial"
+
+# ---------------------------------------------------------------------------
+# Serial port  (used when connection_type = "serial")
 # ---------------------------------------------------------------------------
 port_name = "/dev/ttyACM0"
 baud_rate  = 9600
 set_gps_to_10hz = false
+
+# ---------------------------------------------------------------------------
+# TCP bridge   (used when connection_type = "tcp")
+# ---------------------------------------------------------------------------
+# Point these at an io-to-net instance forwarding the GPS serial port.
+# Example io-to-net bridge config (gps bridge listening on port 9001):
+#
+#   [[bridges]]
+#   name = "gps"
+#   frame_mode = "line"
+#
+#   [bridges.source]
+#   type  = "serial"
+#   port  = "/dev/ttyUSB0"
+#   baud  = 9600
+#
+#   [bridges.transport]
+#   type   = "tcp"
+#   listen = "[::]:9001"
+#
+# tcp_host = "192.168.1.10"
+# tcp_port = 9001
 
 # ---------------------------------------------------------------------------
 # MQTT
@@ -45,6 +76,13 @@ max_log_buffer_size  = 1000
 # ---------------------------------------------------------------------------
 telemetry_enabled          = true
 telemetry_smoothing_window = 3
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------------------------
+prometheus_enabled = false        # set to true to expose /metrics and /health
+prometheus_port    = 9090
+prometheus_bind    = "0.0.0.0"   # use "127.0.0.1" to restrict to localhost
 
 # ---------------------------------------------------------------------------
 # Track / lap timing

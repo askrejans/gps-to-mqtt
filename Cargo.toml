@@ -1,6 +1,6 @@
 [package]
 name = "gps-to-mqtt"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 authors = ["askrejans"]
 description = "GPS to MQTT bridge"
@@ -51,3 +51,10 @@ chrono = "0.4.44"
 
 # XML parsing (for GPX files)
 quick-xml = "0.39.2"
+
+# Prometheus metrics + HTTP server
+prometheus = "0.14.0"
+axum = "0.8"
+
+[dev-dependencies]
+serde_json = "1.0.149"

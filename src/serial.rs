@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::metrics::NMEA_SENTENCES_TOTAL;
 use crate::parser::{GpsEvent, parse_nmea_sentence};
 use anyhow::{Context, Result};
 use serialport::SerialPort;
@@ -235,6 +236,7 @@ fn read_from_port(
                                 && nmea_checksum_ok(trimmed)
                             {
                                 sentences_received += 1;
+                                NMEA_SENTENCES_TOTAL.inc();
                                 debug!("Received: {}", trimmed);
 
                                 // Send raw NMEA sentence first

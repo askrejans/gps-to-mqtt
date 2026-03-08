@@ -10,9 +10,10 @@ This Rust project serves as a bridge between GPS hardware and MQTT-based systems
 ### Key Capabilities
 
 - **GPS Data Processing**: Reads and parses standard NMEA-0183 sentences including position, speed, course, and satellite information
+- **Dual Input Modes**: Connect via a local serial port **or** a TCP bridge (e.g. [io-to-net](https://github.com/askrejans/io-to-net)) — configurable with a single setting
 - **Real-time MQTT Publishing**: Converts GPS data into structured MQTT messages with configurable topics and QoS levels
 - **High-Frequency Updates**: Optional support for 10Hz update rates on compatible u-blox GPS modules
-- **Flexible Configuration**: TOML-based configuration for serial port settings, MQTT broker details, and topic customization
+- **Flexible Configuration**: TOML-based configuration for serial/TCP settings, MQTT broker details, and topic customization
 - **Automatic Mode Detection**: Runs the interactive TUI when attached to a terminal; falls back to structured service logging when run as a daemon
 - **Racing Telemetry**: Advanced telemetry calculations including acceleration, g-forces, lap timing, and track analysis
 
@@ -33,7 +34,7 @@ While the software supports standard NMEA-0183 protocols, it has been primarily 
 
 ## Features
 
-- 📡 Reads NMEA-0183 GPS data from USB GPS dongles
+- 📡 Reads NMEA-0183 GPS data from USB GPS dongles or a TCP bridge
 - 🔄 Support for 10Hz GPS update rate (u-blox devices only)
 - 🛰️ Parses multiple NMEA sentence types:
   - GSV (Satellites in View)
@@ -176,6 +177,8 @@ See `gps-to-mqtt.service` for a ready-made unit file.
 - `src/track.rs`: Lap timing and track management
 - `src/mqtt.rs`: Async MQTT client with reconnection logic
 - `src/serial.rs`: Serial port handling with automatic reconnection
+- `src/tcp.rs`: TCP bridge connection with automatic reconnection
+- `src/metrics.rs`: Prometheus metrics exposition and health endpoint
 - `src/models.rs`: Data structures for GPS and telemetry state
 - `src/ui/`: Terminal UI implementation with multiple tabs
 - `src/service.rs`: Service mode and signal handling
@@ -196,9 +199,17 @@ Configuration is loaded from TOML files. The application searches for configurat
 See `example.settings.toml` for the full annotated reference. Common options:
 
 ```toml
+# GPS input source: "serial" (default) or "tcp"
+connection_type = "serial"
+
+# --- Serial port (connection_type = "serial") ---
 port_name = "/dev/ttyACM0"
 baud_rate  = 9600
 set_gps_to_10hz = false
+
+# --- TCP bridge (connection_type = "tcp") ---
+# tcp_host = "192.168.1.10"
+# tcp_port = 9001
 
 mqtt_enabled = true          # false = display-only, no MQTT publishing
 mqtt_host    = "localhost"
@@ -215,6 +226,100 @@ log_json  = false             # true = JSON structured logs
 track_mode = "disabled"      # disabled | manual | learn | gpx
 ```
 
+### TCP Bridge Mode
+
+Instead of a locally attached serial GPS device you can connect to a
+[io-to-net](https://github.com/askrejans/io-to-net) bridge that exposes the
+serial port over TCP. This is useful for:
+
+- GPS devices attached to a remote Raspberry Pi or embedded board
+- Running gps-to-mqtt on a different machine than the one with the GPS dongle
+- Sharing a single GPS device with multiple consumers
+
+**gps-to-mqtt config (`settings.toml`):**
+
+```toml
+connection_type = "tcp"
+tcp_host = "192.168.1.10"   # address of the io-to-net host
+tcp_port = 9001
+```
+
+**io-to-net bridge config (on the host with the GPS dongle):**
+
+```toml
+[[bridges]]
+name = "gps"
+frame_mode = "line"   # each NMEA sentence arrives as one complete line
+
+[bridges.source]
+type  = "serial"
+port  = "/dev/ttyUSB0"
+baud  = 9600
+
+[bridges.transport]
+type   = "tcp"
+listen = "[::]:9001"
+```
+
+The TCP task handles both line-framed and raw-stream bridges — data is
+buffered internally and NMEA sentences are extracted whenever a `\n` is found,
+regardless of TCP packet boundaries. Automatic reconnection with exponential
+backoff is applied when the bridge connection drops.
+
+### Prometheus Metrics
+
+Enable a lightweight HTTP server that exposes a Prometheus scrape endpoint and a JSON health check:
+
+```toml
+prometheus_enabled = true
+prometheus_port    = 9090
+prometheus_bind    = "0.0.0.0"   # or "127.0.0.1" to restrict access
+```
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /metrics` | Prometheus text format (scrape target) |
+| `GET /health` | JSON health summary |
+
+**Exposed metrics:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `gps_nmea_sentences_total` | counter | Total NMEA sentences received |
+| `gps_connected` | gauge | 1 if GPS source is connected |
+| `gps_fix_quality` | gauge | Fix quality (0=invalid, 1=GPS, 2=DGPS, 4=RTK…) |
+| `gps_satellites_used` | gauge | Satellites used in current fix |
+| `gps_satellites_in_view` | gauge | Total tracked satellites |
+| `gps_hdop` | gauge | Horizontal dilution of precision |
+| `gps_speed_kmh` | gauge | Current speed in km/h |
+| `gps_altitude_meters` | gauge | Altitude above sea level (m) |
+| `gps_position_accuracy_meters` | gauge | 2D position accuracy (m, from GST) |
+| `mqtt_connected` | gauge | 1 if MQTT broker is connected |
+| `mqtt_messages_published_total` | counter | Total MQTT messages published |
+
+**Example Prometheus scrape config:**
+
+```yaml
+scrape_configs:
+  - job_name: gps-to-mqtt
+    static_configs:
+      - targets: ["localhost:9090"]
+```
+
+**Health endpoint response:**
+
+```json
+{
+  "status": "ok",
+  "gps_connected": true,
+  "mqtt_connected": true,
+  "mqtt_enabled": true,
+  "connection_address": "/dev/ttyUSB0 @ 9600 baud"
+}
+```
+
+`status` is `"ok"` when GPS is connected, `"degraded"` otherwise.
+
 ### Environment Variables
 
 All settings can be overridden via `GPS_TO_MQTT_*` environment variables
@@ -222,8 +327,11 @@ All settings can be overridden via `GPS_TO_MQTT_*` environment variables
 
 | Variable | Equivalent setting |
 |----------|-------------------|
+| `GPS_TO_MQTT_CONNECTION_TYPE` | `connection_type` |
 | `GPS_TO_MQTT_PORT_NAME` | `port_name` |
 | `GPS_TO_MQTT_BAUD_RATE` | `baud_rate` |
+| `GPS_TO_MQTT_TCP_HOST` | `tcp_host` |
+| `GPS_TO_MQTT_TCP_PORT` | `tcp_port` |
 | `GPS_TO_MQTT_MQTT_ENABLED` | `mqtt_enabled` |
 | `GPS_TO_MQTT_MQTT_HOST` | `mqtt_host` |
 | `GPS_TO_MQTT_MQTT_PORT` | `mqtt_port` |
@@ -232,6 +340,9 @@ All settings can be overridden via `GPS_TO_MQTT_*` environment variables
 | `GPS_TO_MQTT_MQTT_PASSWORD` | `mqtt_password` |
 | `GPS_TO_MQTT_LOG_LEVEL` | `log_level` |
 | `GPS_TO_MQTT_LOG_JSON` | `log_json` |
+| `GPS_TO_MQTT_PROMETHEUS_ENABLED` | `prometheus_enabled` |
+| `GPS_TO_MQTT_PROMETHEUS_PORT` | `prometheus_port` |
+| `GPS_TO_MQTT_PROMETHEUS_BIND` | `prometheus_bind` |
 
 ## MQTT Topics
 
@@ -317,19 +428,21 @@ Feel free to reach out if you have any questions or encounter issues. Happy tele
 The application uses a modern async architecture built on tokio:
 
 ```
-Serial Port Task (blocking) → GPS Parser → Event Channel
-                                              ↓
-                                     State Aggregator
-                                              ↓
-                                        Shared State ← TUI/CLI/Service
-                                              ↓
-                                       MQTT Publisher
+Serial Port Task (blocking)  ┐
+  OR                         ├─→ GPS Parser → Event Channel
+TCP Bridge Task (async)      ┘                     ↓
+                                          State Aggregator
+                                                   ↓
+                                             Shared State ← TUI/CLI/Service
+                                                   ↓
+                                            MQTT Publisher
 ```
 
 ### Key Components
 
 - **parser.rs**: Pure NMEA sentence parser returning structured events
-- **serial.rs**: Async serial port handler with reconnection logic
+- **serial.rs**: Serial port handler with reconnection logic (blocking task)
+- **tcp.rs**: Async TCP bridge handler with reconnection logic
 - **mqtt.rs**: Async MQTT client with automatic reconnection and buffering
 - **models.rs**: Data structures for GPS state and application state
 - **ui/**: Ratatui-based TUI with multiple widgets and tabs

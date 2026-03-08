@@ -20,7 +20,15 @@ const VALID_BAUD_RATES: &[u32] = &[9600, 19200, 38400, 57600, 115200, 230400, 46
 /// (or partially filled) TOML file works without errors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    // --- Serial port ---
+    // --- Connection type ---
+    /// GPS input source: `serial` (default) or `tcp`
+    ///
+    /// Use `tcp` to connect to a serial-to-TCP bridge such as
+    /// [io-to-net](https://github.com/askrejans/io-to-net).
+    #[serde(default = "default_connection_type")]
+    pub connection_type: String,
+
+    // --- Serial port (used when connection_type = "serial") ---
     /// Serial device path, e.g. `/dev/ttyUSB0` or `COM3`
     #[serde(default = "default_port_name")]
     pub port_name: String,
@@ -32,6 +40,13 @@ pub struct AppConfig {
     /// Send a UBX command to switch the receiver to 10 Hz
     #[serde(default)]
     pub set_gps_to_10hz: bool,
+
+    // --- TCP bridge (used when connection_type = "tcp") ---
+    /// Hostname or IP of the TCP bridge (e.g. io-to-net)
+    pub tcp_host: Option<String>,
+
+    /// TCP port of the bridge
+    pub tcp_port: Option<u16>,
 
     // --- MQTT ---
     /// Enable MQTT publishing (`false` = display-only / TUI mode)
@@ -112,6 +127,19 @@ pub struct AppConfig {
     /// Path to GPX file (required for `gpx` mode)
     pub track_gpx_file: Option<String>,
 
+    // --- Prometheus metrics ---
+    /// Expose a Prometheus `/metrics` and `/health` HTTP endpoint
+    #[serde(default)]
+    pub prometheus_enabled: bool,
+
+    /// Port the metrics HTTP server listens on
+    #[serde(default = "default_prometheus_port")]
+    pub prometheus_port: u16,
+
+    /// Address the metrics HTTP server binds to
+    #[serde(default = "default_prometheus_bind")]
+    pub prometheus_bind: String,
+
     /// Internal: path to the config file that was loaded (set at runtime)
     #[serde(skip)]
     pub config_path: Option<String>,
@@ -159,13 +187,25 @@ fn default_track_mode() -> String {
 fn default_track_geofence_radius() -> f64 {
     15.0
 }
+fn default_connection_type() -> String {
+    "serial".to_string()
+}
+fn default_prometheus_port() -> u16 {
+    9090
+}
+fn default_prometheus_bind() -> String {
+    "0.0.0.0".to_string()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            connection_type: default_connection_type(),
             port_name: default_port_name(),
             baud_rate: default_baud_rate(),
             set_gps_to_10hz: false,
+            tcp_host: None,
+            tcp_port: None,
             mqtt_enabled: default_mqtt_enabled(),
             mqtt_host: default_mqtt_host(),
             mqtt_port: default_mqtt_port(),
@@ -186,6 +226,9 @@ impl Default for AppConfig {
             track_start_lon: None,
             track_geofence_radius: default_track_geofence_radius(),
             track_gpx_file: None,
+            prometheus_enabled: false,
+            prometheus_port: default_prometheus_port(),
+            prometheus_bind: default_prometheus_bind(),
             config_path: None,
         }
     }
@@ -194,11 +237,28 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Validate configuration values.
     pub fn validate(&self) -> Result<()> {
-        if self.port_name.is_empty() {
-            anyhow::bail!("port_name must not be empty");
+        let valid_connection_types = ["serial", "tcp"];
+        if !valid_connection_types.contains(&self.connection_type.to_lowercase().as_str()) {
+            anyhow::bail!(
+                "connection_type must be one of: {:?}",
+                valid_connection_types
+            );
         }
-        if !VALID_BAUD_RATES.contains(&self.baud_rate) {
-            anyhow::bail!("baud_rate must be one of: {:?}", VALID_BAUD_RATES);
+        if self.connection_type == "serial" {
+            if self.port_name.is_empty() {
+                anyhow::bail!("port_name must not be empty when connection_type = serial");
+            }
+            if !VALID_BAUD_RATES.contains(&self.baud_rate) {
+                anyhow::bail!("baud_rate must be one of: {:?}", VALID_BAUD_RATES);
+            }
+        }
+        if self.connection_type == "tcp" {
+            if self.tcp_host.as_deref().unwrap_or("").is_empty() {
+                anyhow::bail!("tcp_host must be set when connection_type = tcp");
+            }
+            if self.tcp_port.unwrap_or(0) == 0 {
+                anyhow::bail!("tcp_port must be set and > 0 when connection_type = tcp");
+            }
         }
         if self.mqtt_enabled {
             if self.mqtt_host.is_empty() {
@@ -227,12 +287,28 @@ impl AppConfig {
         if self.track_mode == "gpx" && self.track_gpx_file.is_none() {
             anyhow::bail!("track_gpx_file is required for gpx track_mode");
         }
+        if self.prometheus_enabled {
+            if self.prometheus_port == 0 {
+                anyhow::bail!("prometheus_port must be > 0 when prometheus_enabled = true");
+            }
+            if self.prometheus_bind.is_empty() {
+                anyhow::bail!("prometheus_bind must not be empty when prometheus_enabled = true");
+            }
+        }
         Ok(())
     }
 
     /// Human-readable GPS connection string shown in TUI.
     pub fn connection_display(&self) -> String {
-        format!("{} @ {} baud", self.port_name, self.baud_rate)
+        if self.connection_type == "tcp" {
+            format!(
+                "TCP {}:{}",
+                self.tcp_host.as_deref().unwrap_or("?"),
+                self.tcp_port.unwrap_or(0)
+            )
+        } else {
+            format!("{} @ {} baud", self.port_name, self.baud_rate)
+        }
     }
 
     /// Human-readable MQTT broker address shown in TUI.
@@ -479,14 +555,6 @@ mod tests {
     // --- helpers ---
 
     #[test]
-    fn test_connection_display() {
-        let mut c = AppConfig::default();
-        c.port_name = "/dev/ttyUSB0".to_string();
-        c.baud_rate = 115200;
-        assert_eq!(c.connection_display(), "/dev/ttyUSB0 @ 115200 baud");
-    }
-
-    #[test]
     fn test_mqtt_address() {
         let mut c = AppConfig::default();
         c.mqtt_host = "broker.example.com".to_string();
@@ -497,5 +565,124 @@ mod tests {
     #[test]
     fn test_mqtt_address_default() {
         assert_eq!(AppConfig::default().mqtt_address(), "localhost:1883");
+    }
+
+    // --- validation: connection_type ---
+
+    #[test]
+    fn test_default_connection_type_is_serial() {
+        let c = AppConfig::default();
+        assert_eq!(c.connection_type, "serial");
+    }
+
+    #[test]
+    fn test_validate_invalid_connection_type_fails() {
+        let mut c = AppConfig::default();
+        c.connection_type = "usb".to_string();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_tcp_without_host_fails() {
+        let mut c = AppConfig::default();
+        c.connection_type = "tcp".to_string();
+        c.tcp_port = Some(9001);
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_tcp_without_port_fails() {
+        let mut c = AppConfig::default();
+        c.connection_type = "tcp".to_string();
+        c.tcp_host = Some("192.168.1.10".to_string());
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_tcp_port_zero_fails() {
+        let mut c = AppConfig::default();
+        c.connection_type = "tcp".to_string();
+        c.tcp_host = Some("192.168.1.10".to_string());
+        c.tcp_port = Some(0);
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_tcp_with_host_and_port_passes() {
+        let mut c = AppConfig::default();
+        c.connection_type = "tcp".to_string();
+        c.tcp_host = Some("192.168.1.10".to_string());
+        c.tcp_port = Some(9001);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_serial_skips_tcp_fields() {
+        // TCP fields absent — should still pass when connection_type = serial
+        let c = AppConfig::default();
+        assert_eq!(c.connection_type, "serial");
+        assert!(c.tcp_host.is_none());
+        assert!(c.tcp_port.is_none());
+        assert!(c.validate().is_ok());
+    }
+
+    // --- connection_display ---
+
+    #[test]
+    fn test_connection_display_serial() {
+        let mut c = AppConfig::default();
+        c.port_name = "/dev/ttyUSB0".to_string();
+        c.baud_rate = 115200;
+        assert_eq!(c.connection_display(), "/dev/ttyUSB0 @ 115200 baud");
+    }
+
+    #[test]
+    fn test_connection_display_tcp() {
+        let mut c = AppConfig::default();
+        c.connection_type = "tcp".to_string();
+        c.tcp_host = Some("192.168.1.10".to_string());
+        c.tcp_port = Some(9001);
+        assert_eq!(c.connection_display(), "TCP 192.168.1.10:9001");
+    }
+
+    // --- validation: prometheus ---
+
+    #[test]
+    fn test_default_prometheus_disabled() {
+        let c = AppConfig::default();
+        assert!(!c.prometheus_enabled);
+        assert_eq!(c.prometheus_port, 9090);
+        assert_eq!(c.prometheus_bind, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_validate_prometheus_enabled_with_defaults_passes() {
+        let mut c = AppConfig::default();
+        c.prometheus_enabled = true;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_prometheus_port_zero_fails() {
+        let mut c = AppConfig::default();
+        c.prometheus_enabled = true;
+        c.prometheus_port = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_prometheus_empty_bind_fails() {
+        let mut c = AppConfig::default();
+        c.prometheus_enabled = true;
+        c.prometheus_bind = String::new();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_prometheus_disabled_ignores_port() {
+        let mut c = AppConfig::default();
+        c.prometheus_enabled = false;
+        c.prometheus_port = 0; // would fail if enabled
+        assert!(c.validate().is_ok());
     }
 }

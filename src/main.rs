@@ -1,10 +1,12 @@
 mod config;
 mod logging;
+mod metrics;
 mod models;
 mod mqtt;
 mod parser;
 mod serial;
 mod service;
+mod tcp;
 mod telemetry;
 mod track;
 mod ui;
@@ -76,11 +78,12 @@ async fn main() -> Result<()> {
     let (gps_data_tx, gps_data_rx) = mpsc::channel::<GpsData>(10);
     let (mqtt_status_tx, mqtt_status_rx) = mpsc::channel::<MqttStatus>(10);
 
-    // GPS event → state + forward to MQTT
+    // GPS event → state + forward to MQTT (None when MQTT disabled)
     {
         let state = Arc::clone(&app_state);
+        let data_tx = if config.mqtt_enabled { Some(gps_data_tx) } else { None };
         tokio::spawn(async move {
-            process_gps_events(gps_event_rx, state, gps_data_tx).await;
+            process_gps_events(gps_event_rx, state, data_tx).await;
         });
     }
 
@@ -92,9 +95,14 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Start serial port
-    serial::spawn_serial_task(config.clone(), gps_event_tx, cancel.clone()).await?;
-    info!("Serial port task started");
+    // Start GPS source (serial port or TCP bridge)
+    if config.connection_type == "tcp" {
+        tcp::spawn_tcp_task(config.clone(), gps_event_tx, cancel.clone()).await?;
+        info!("TCP bridge task started");
+    } else {
+        serial::spawn_serial_task(config.clone(), gps_event_tx, cancel.clone()).await?;
+        info!("Serial port task started");
+    }
 
     // Start MQTT client (optional)
     if config.mqtt_enabled {
@@ -103,9 +111,25 @@ async fn main() -> Result<()> {
         info!("MQTT task started");
     } else {
         info!("MQTT disabled — running in display-only mode");
-        // Drop unused sender so the channel cleanly closes
         drop(gps_data_rx);
         drop(mqtt_status_tx);
+    }
+
+    // Start Prometheus metrics server (optional)
+    if config.prometheus_enabled {
+        let bind = config.prometheus_bind.clone();
+        let port = config.prometheus_port;
+        let state = Arc::clone(&app_state);
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            if let Err(e) = metrics::spawn_metrics_server(&bind, port, state, c).await {
+                error!("Metrics server error: {}", e);
+            }
+        });
+        info!(
+            "Prometheus metrics server started on {}:{}",
+            config.prometheus_bind, config.prometheus_port
+        );
     }
 
     // Spawn signal listener — cancels the token on SIGTERM / Ctrl+C
@@ -136,7 +160,7 @@ async fn main() -> Result<()> {
 async fn process_gps_events(
     mut event_rx: mpsc::Receiver<GpsEvent>,
     state: Arc<RwLock<AppState>>,
-    data_tx: mpsc::Sender<GpsData>,
+    data_tx: Option<mpsc::Sender<GpsData>>,
 ) {
     while let Some(event) = event_rx.recv().await {
         let mut state_guard = state.write().await;
@@ -229,8 +253,10 @@ async fn process_gps_events(
         state_guard.gps_data.satellites_in_view =
             Some(state_guard.gps_data.satellites.len() as u32);
 
-        if let Err(e) = data_tx.send(state_guard.gps_data.clone()).await {
-            warn!("Failed to send GPS data to MQTT publisher: {}", e);
+        if let Some(ref tx) = data_tx {
+            if let Err(e) = tx.send(state_guard.gps_data.clone()).await {
+                warn!("Failed to send GPS data to MQTT publisher: {}", e);
+            }
         }
     }
 
