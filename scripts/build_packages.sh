@@ -217,7 +217,8 @@ build_binary() {
         require_cmd cross "Install with: cargo install cross  (also needs Docker)"
         # Run cross from the project dir – cross maps cwd into the container,
         # so --manifest-path with a host path breaks inside Docker.
-        (cd "$PROJECT_DIR" && cross build --release --target "$triple")
+        # cross container images are amd64-only; on Apple Silicon use Rosetta via DOCKER_DEFAULT_PLATFORM.
+        (cd "$PROJECT_DIR" && DOCKER_DEFAULT_PLATFORM=linux/amd64 cross build --release --target "$triple")
     else
         rustup target add "$triple" 2>/dev/null || true
         (cd "$PROJECT_DIR" && cargo build --release --target "$triple")

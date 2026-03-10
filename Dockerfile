@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         make \
         cmake \
         pkg-config \
+        libudev-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
