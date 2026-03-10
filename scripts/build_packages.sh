@@ -276,10 +276,10 @@ EOF
     cat > "$debian_dir/postinst" <<'POSTINST'
 #!/bin/bash
 set -e
-# Create service user in dialout group for serial GPS access
+# Create service user in dialout+tty groups for serial GPS access
 if ! id gps &>/dev/null; then
     useradd --system --no-create-home --shell /usr/sbin/nologin \
-            --groups dialout gps 2>/dev/null || true
+            --groups dialout,tty gps 2>/dev/null || true
 fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
@@ -372,7 +372,7 @@ install -m644 %{_sourcedir}/settings.toml.example \
 getent group  dialout >/dev/null || groupadd -r dialout || true
 getent passwd gps >/dev/null || \
     useradd --system --no-create-home --shell /sbin/nologin \
-            -G dialout gps || true
+            -G dialout,tty gps || true
 
 %files
 %{_bindir}/$PKG_NAME
