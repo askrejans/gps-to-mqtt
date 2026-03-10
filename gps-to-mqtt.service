@@ -3,40 +3,62 @@ Description=GPS to MQTT Bridge Service
 Documentation=https://github.com/askrejans/gps-to-mqtt
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
 User=gps
 Group=gps
-WorkingDirectory=/
+
+# Path to the binary
 ExecStart=/usr/bin/gps-to-mqtt --config /etc/gps-to-mqtt/settings.toml
 
-# Restart configuration
+# Working directory (app writes no state; /tmp is always available)
+WorkingDirectory=/tmp
+
+# Restart policy
 Restart=always
 RestartSec=10
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
-# Security settings
+# Resource limits
+MemoryMax=256M
+CPUQuota=50%
+
+# Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
 
-# Optional environment variable overrides (uncomment and adjust as needed):
-# Environment=GPS_TO_MQTT_MQTT_HOST=localhost
-# Environment=GPS_TO_MQTT_MQTT_PORT=1883
-# Environment=GPS_TO_MQTT_LOG_LEVEL=info
+# Serial / TTY access – allow any GPS device the service user can reach.
+# The 'dialout' group gives access to /dev/ttyACM*, /dev/ttyUSB*, /dev/ttyS*
+SupplementaryGroups=dialout
 
-# Resource limits
-LimitNOFILE=65536
-MemoryLimit=512M
+# Capabilities
+CapabilityBoundingSet=
+AmbientCapabilities=
 
-# Environment
-Environment="RUST_LOG=info"
+# System call filtering
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallErrorNumber=EPERM
+
+# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=gps-to-mqtt
+
+# Environment variables (optional - can also use settings.toml)
+# Environment="GPS_TO_MQTT_LOG_LEVEL=info"
+# Environment="GPS_TO_MQTT_MQTT_HOST=mqtt.local"
 
 [Install]
 WantedBy=multi-user.target

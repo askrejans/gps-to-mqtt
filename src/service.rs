@@ -27,9 +27,3 @@ pub async fn wait_for_shutdown_signal() {
         _ = terminate => { info!("Received SIGTERM"); },
     }
 }
-
-#[cfg(not(unix))]
-pub async fn setup_sighup_handler() -> Result<tokio::sync::mpsc::Receiver<()>> {
-    let (_tx, rx) = tokio::sync::mpsc::channel(1);
-    Ok(rx)
-}

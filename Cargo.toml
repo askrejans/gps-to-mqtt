@@ -1,6 +1,6 @@
 [package]
 name = "gps-to-mqtt"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 authors = ["askrejans"]
 description = "GPS to MQTT bridge"
@@ -26,10 +26,6 @@ gumdrop = "0.8"
 
 # TTY detection
 atty = "0.2"
-
-# Signal handling
-signal-hook = "0.4.3"
-signal-hook-tokio = { version = "0.4.0", features = ["futures-v0_3"] }
 
 # MQTT (async client)
 rumqttc = "0.25.1"

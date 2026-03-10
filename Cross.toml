@@ -1,0 +1,15 @@
+# Cross.toml – configuration for `cross` (https://github.com/cross-rs/cross)
+#
+# The serialport crate requires libudev on Linux for port enumeration.
+# Pre-build steps install libudev-dev inside the cross Docker container.
+# For aarch64, multi-arch is enabled so the arm64 variant can be installed.
+
+[target.x86_64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update -qq && apt-get install -y --no-install-recommends libudev-dev",
+]
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture arm64 && apt-get update -qq && apt-get install -y --no-install-recommends libudev-dev:arm64",
+]

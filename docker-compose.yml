@@ -1,0 +1,60 @@
+services:
+
+  gps-to-mqtt:
+    # ── Image ────────────────────────────────────────────────────────────────
+    # Option A – build locally from source:
+    build: .
+    # Option B – use the pre-built image from the registry:
+    # image: ghcr.io/askrejans/gps-to-mqtt:latest
+
+    restart: unless-stopped
+
+    # ── Serial device (serial connection only) ───────────────────────────────
+    # Uncomment and adjust if connecting via USB/serial GPS dongle.
+    # Common paths: /dev/ttyACM0, /dev/ttyUSB0, /dev/ttyS0
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+
+    environment:
+
+      # ── Connection type ─────────────────────────────────────────────────────
+      # "serial" – direct USB/serial GPS dongle (uncomment devices block above)
+      # "tcp"    – TCP bridge, e.g. io-to-net (https://github.com/askrejans/io-to-net)
+      GPS_TO_MQTT_CONNECTION_TYPE: serial
+
+      # ── Serial settings (used when CONNECTION_TYPE=serial) ──────────────────
+      GPS_TO_MQTT_PORT_NAME: /dev/ttyUSB0   # device path inside the container
+      GPS_TO_MQTT_BAUD_RATE: "9600"
+
+      # ── 10 Hz mode (u-blox devices only – use at your own risk) ─────────────
+      # GPS_TO_MQTT_SET_GPS_TO_10HZ: "false"
+
+      # ── TCP settings (used when CONNECTION_TYPE=tcp) ─────────────────────────
+      # GPS_TO_MQTT_TCP_HOST: 192.168.1.10  # IP or hostname of the TCP bridge
+      # GPS_TO_MQTT_TCP_PORT: "9001"        # port exposed by the bridge
+
+      # ── MQTT broker ──────────────────────────────────────────────────────────
+      GPS_TO_MQTT_MQTT_ENABLED: "true"        # set "false" for display/log-only mode
+      GPS_TO_MQTT_MQTT_HOST: mqtt.local       # broker IP or hostname
+      GPS_TO_MQTT_MQTT_PORT: "1883"
+      GPS_TO_MQTT_MQTT_BASE_TOPIC: /CAR/GPS/
+      # GPS_TO_MQTT_MQTT_USERNAME: ""
+      # GPS_TO_MQTT_MQTT_PASSWORD: ""
+
+      # ── Logging ──────────────────────────────────────────────────────────────
+      # trace | debug | info | warn | error
+      GPS_TO_MQTT_LOG_LEVEL: info
+
+      # ── Prometheus metrics (optional) ────────────────────────────────────────
+      # GPS_TO_MQTT_PROMETHEUS_ENABLED: "false"
+      # GPS_TO_MQTT_PROMETHEUS_PORT: "9090"
+      # GPS_TO_MQTT_PROMETHEUS_BIND: "0.0.0.0"
+
+    # ── Prometheus port (uncomment if metrics enabled above) ─────────────────
+    # ports:
+    #   - "9090:9090"
+
+    # ── Optional: mount a settings.toml instead of / in addition to env vars ──
+    # Env vars always take priority over the file.
+    # volumes:
+    #   - ./settings.toml:/etc/gps-to-mqtt/settings.toml:ro
