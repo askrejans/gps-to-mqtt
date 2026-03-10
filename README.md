@@ -39,8 +39,6 @@ The software supports standard NMEA-0183 protocols and has been primarily tested
 - 🌍 Multi-GNSS support (GPS, GLONASS, Galileo, BeiDou)
 - 📈 Optional Prometheus metrics + HTTP health endpoint
 
-<img width="1324" height="794" alt="Screenshot 2026-03-10 at 22 24 14" src="https://github.com/user-attachments/assets/fb49af25-f786-4145-8d70-259087a7fa94" />
-
 <img width="1324" height="794" alt="Screenshot 2026-03-10 at 22 24 40" src="https://github.com/user-attachments/assets/09581858-b5c7-4804-a70b-12da0a500f1b" />
 
 
