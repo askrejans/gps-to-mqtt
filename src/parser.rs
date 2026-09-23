@@ -396,8 +396,8 @@ fn parse_pubx(sentence: &str) -> Result<Vec<GpsEvent>> {
 }
 
 /// Parse time from NMEA format (HHMMSS.sss)
-fn parse_time(time_str: &str) -> Result<NaiveTime> {
-    if time_str.is_empty() || time_str.len() < 6 {
+pub(crate) fn parse_time(time_str: &str) -> Result<NaiveTime> {
+    if !time_str.is_ascii() || time_str.len() < 6 {
         anyhow::bail!("Invalid time string");
     }
 
@@ -405,12 +405,24 @@ fn parse_time(time_str: &str) -> Result<NaiveTime> {
     let minute: u32 = time_str[2..4].parse().context("Invalid minute")?;
     let second: u32 = time_str[4..6].parse().context("Invalid second")?;
 
-    NaiveTime::from_hms_opt(hour, minute, second).context("Invalid time values")
+    let fraction = time_str.get(6..).unwrap_or("");
+    let nanos = if fraction.is_empty() {
+        0
+    } else {
+        let digits = fraction
+            .strip_prefix('.')
+            .context("Invalid fractional time")?;
+        if digits.is_empty() || digits.len() > 9 || !digits.bytes().all(|c| c.is_ascii_digit()) {
+            anyhow::bail!("Invalid fractional time");
+        }
+        digits.parse::<u32>()? * 10_u32.pow(9 - digits.len() as u32)
+    };
+    NaiveTime::from_hms_nano_opt(hour, minute, second, nanos).context("Invalid time values")
 }
 
 /// Parse date from NMEA format (DDMMYY)
-fn parse_date(date_str: &str) -> Result<NaiveDate> {
-    if date_str.is_empty() || date_str.len() < 6 {
+pub(crate) fn parse_date(date_str: &str) -> Result<NaiveDate> {
+    if date_str.len() != 6 || !date_str.bytes().all(|c| c.is_ascii_digit()) {
         anyhow::bail!("Invalid date string");
     }
 
@@ -422,23 +434,29 @@ fn parse_date(date_str: &str) -> Result<NaiveDate> {
 }
 
 /// Parse coordinate from NMEA format (DDMM.MMMM or DDDMM.MMMM)
-fn parse_coordinate(coord_str: &str, dir: &str) -> Result<f64> {
-    if coord_str.is_empty() {
-        anyhow::bail!("Empty coordinate");
-    }
-
-    let dot_pos = coord_str.find('.').context("No decimal point")?;
-
-    // Extract degrees (everything before last 2 digits before decimal)
-    let deg_end = if dot_pos >= 4 {
-        dot_pos - 2
-    } else {
-        dot_pos.saturating_sub(2)
+pub(crate) fn parse_coordinate(coord_str: &str, dir: &str) -> Result<f64> {
+    let degree_digits = match dir {
+        "N" | "S" => 2,
+        "E" | "W" => 3,
+        _ => anyhow::bail!("Invalid coordinate direction"),
     };
-    let degrees: f64 = coord_str[0..deg_end].parse().context("Invalid degrees")?;
-
-    // Extract minutes
-    let minutes: f64 = coord_str[deg_end..].parse().context("Invalid minutes")?;
+    if !coord_str.is_ascii()
+        || coord_str.find('.') != Some(degree_digits + 2)
+        || !coord_str.bytes().all(|c| c.is_ascii_digit() || c == b'.')
+    {
+        anyhow::bail!("Invalid coordinate format");
+    }
+    let degrees: f64 = coord_str[..degree_digits]
+        .parse()
+        .context("Invalid degrees")?;
+    let minutes: f64 = coord_str[degree_digits..]
+        .parse()
+        .context("Invalid minutes")?;
+    let maximum = if degree_digits == 2 { 90.0 } else { 180.0 };
+    if !(0.0..60.0).contains(&minutes) || degrees > maximum || (degrees == maximum && minutes > 0.0)
+    {
+        anyhow::bail!("Invalid coordinate range");
+    }
 
     let mut decimal = degrees + (minutes / 60.0);
 
@@ -453,7 +471,7 @@ fn parse_coordinate(coord_str: &str, dir: &str) -> Result<f64> {
 /// Parse GST (GNSS Pseudorange Error Statistics) sentence
 fn parse_gst(sentence: &str) -> Result<Vec<GpsEvent>> {
     let parts: Vec<&str> = sentence.split(',').collect();
-    if parts.len() < 8 {
+    if parts.len() < 9 {
         return Ok(vec![]);
     }
 
@@ -700,7 +718,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, GpsEvent::SatelliteUpdate(_)))
             .count();
-        assert!(sat_count > 0, "intermediate GSV message should emit SatelliteUpdate events");
+        assert!(
+            sat_count > 0,
+            "intermediate GSV message should emit SatelliteUpdate events"
+        );
     }
 
     #[test]

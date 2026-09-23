@@ -562,3 +562,61 @@ Ensure your terminal supports UTF-8 and has at least 80×24 characters.
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Local canonical archive (0.6.0)
+
+Set `telemetry_log` to an absolute NDJSON filename. Under the packaged systemd
+service, use `/var/lib/gps-to-mqtt/telemetry.ndjson`; its private `StateDirectory`
+permits writes with the otherwise read-only service filesystem.
+
+Each decoded canonical packet is appended and its file data synchronized before
+live forwarding. The archive continues with MQTT disabled or unavailable. An
+active file is capped at 512 MiB. A write/capacity failure logs an error at most
+once per minute while live processing continues. Monitor the service journal and
+free storage; a failing archive is not silently represented as a successful save.
+Use reliable power/storage. A crash can leave the last line incomplete.
+
+Rotate by renaming, not `copytruncate`. The writer opens the path for each
+append, so the next packet creates a new private file. For example:
+
+```text
+/var/lib/gps-to-mqtt/telemetry.ndjson {
+    daily
+    maxsize 64M
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+    nocreate
+}
+```
+
+Run logrotate at least hourly if using `maxsize`. Rotation removes the oldest
+files after eight archives. Active-file caps are separate from total retention;
+check disk space and export evidence before rotation removes it. The raw archive
+is an independent capture file. It does not automatically create or upload G86
+sessions; record on the connected phone for timed sessions and cloud review.
+
+## G86 external GPS packet (0.6.0)
+
+The non-retained `<mqtt_base_topic>/position` topic carries a coherent JSON fix:
+`schema: 1`, `source: "nmea"`, `bootId`, `sequence`, `timestampMs` (UTC),
+`latitude`, `longitude`, `speedMps`, `headingDeg`, `accuracyM`, `altitudeM` and
+`accuracySource: "hdop-estimate"`. RMC must be valid, GGA quality must be 1–5,
+checksums must match and both sentences must agree on time and position.
+Fractional NMEA timestamps are preserved. Estimated/dead-reckoned/simulated
+receiver modes are rejected. HDOP × 5 m (minimum 3 m) is a labelled estimate,
+not receiver-reported or survey-certified horizontal accuracy.
+
+In G86 build 39+, select External GPS over MQTT in Settings → GPS & Recording,
+then set the exact position topic. Use the same broker in Connection. This works
+with ECU type None. G86 requires Pro for external data, ignores retained frames,
+requires monotonic capture time/sequence and rejects fixes older than two seconds
+or more than 500 ms ahead of the phone. It does not silently fall back to phone
+GPS during an outage. The phone and receiver need synchronized clocks.
+
+The decoder and a real Rust → Mosquitto → Flutter integration test cover coherent
+fixes, duplicate/stale/retained rejection, optional ECU attachment, Pro revocation
+and archive capture while the broker is down. No physical receiver validation
+or iPhone background-runtime guarantee is implied by these synthetic checks.

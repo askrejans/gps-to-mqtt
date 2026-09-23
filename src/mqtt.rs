@@ -3,7 +3,7 @@ use crate::models::{GpsData, MqttStatus, TrackConfig, TrackConfigMode, TrackPoin
 use crate::telemetry::TelemetryCalculator;
 use crate::track::{LapDetector, parse_gpx_file};
 use anyhow::{Context, Result};
-use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS, Transport};
 use std::collections::HashMap;
 use std::sync::{
     Arc,
@@ -44,6 +44,9 @@ impl MqttClient {
 
         let mut mqttoptions = MqttOptions::new(&client_id, &config.mqtt_host, config.mqtt_port);
 
+        if config.mqtt_use_tls {
+            mqttoptions.set_transport(Transport::tls_with_default_config());
+        }
         mqttoptions.set_keep_alive(Duration::from_secs(30));
         mqttoptions.set_clean_session(true);
 
@@ -199,6 +202,15 @@ pub async fn spawn_mqtt_task(
     // Spawn publishing task
     tokio::spawn(async move {
         while let Some(gps_data) = gps_rx.recv().await {
+            if let Some(ref packet) = gps_data.position_packet {
+                let topic = format!("{}/position", base_topic.trim_end_matches('/'));
+                if let Err(error) = publish_client
+                    .publish(topic, QoS::AtMostOnce, false, packet.as_bytes())
+                    .await
+                {
+                    warn!("Position publish failed: {}", error);
+                }
+            }
             // Publish standard GPS data
             if let Err(e) = publish_gps_data(
                 &publish_client,

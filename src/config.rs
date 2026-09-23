@@ -20,6 +20,9 @@ const VALID_BAUD_RATES: &[u32] = &[9600, 19200, 38400, 57600, 115200, 230400, 46
 /// (or partially filled) TOML file works without errors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Optional absolute path for synced canonical NDJSON capture.
+    #[serde(default)]
+    pub telemetry_log: Option<String>,
     // --- Connection type ---
     /// GPS input source: `serial` (default) or `tcp`
     ///
@@ -200,6 +203,7 @@ fn default_prometheus_bind() -> String {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            telemetry_log: None,
             connection_type: default_connection_type(),
             port_name: default_port_name(),
             baud_rate: default_baud_rate(),
@@ -237,6 +241,13 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Validate configuration values.
     pub fn validate(&self) -> Result<()> {
+        if self
+            .telemetry_log
+            .as_ref()
+            .is_some_and(|p| !std::path::Path::new(p).is_absolute())
+        {
+            anyhow::bail!("telemetry_log must be an absolute path");
+        }
         let valid_connection_types = ["serial", "tcp"];
         if !valid_connection_types.contains(&self.connection_type.to_lowercase().as_str()) {
             anyhow::bail!(

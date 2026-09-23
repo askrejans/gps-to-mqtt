@@ -14,8 +14,11 @@ Group=gps
 # Path to the binary
 ExecStart=/usr/bin/gps-to-mqtt --config /etc/gps-to-mqtt/settings.toml
 
-# Working directory (app writes no state; /tmp is always available)
+# Optional canonical telemetry archive stays in the service state directory
 WorkingDirectory=/tmp
+StateDirectory=gps-to-mqtt
+StateDirectoryMode=0700
+UMask=0077
 
 # Restart policy
 Restart=always

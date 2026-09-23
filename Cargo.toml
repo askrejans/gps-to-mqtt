@@ -1,6 +1,6 @@
 [package]
 name = "gps-to-mqtt"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 authors = ["askrejans"]
 description = "GPS to MQTT bridge"
@@ -52,5 +52,4 @@ quick-xml = "0.39.2"
 prometheus = "0.14.0"
 axum = "0.8"
 
-[dev-dependencies]
 serde_json = "1.0.149"

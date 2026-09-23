@@ -92,3 +92,6 @@ track_mode = "disabled"   # disabled | manual | learn | gpx
 # track_start_lon      = -74.0060
 track_geofence_radius = 15.0
 # track_gpx_file = "/path/to/track.gpx"
+
+# Optional local canonical NDJSON archive; rotate/export before the 512 MiB cap.
+# telemetry_log = "/var/lib/gps-to-mqtt/telemetry.ndjson"

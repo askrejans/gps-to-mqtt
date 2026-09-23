@@ -1,9 +1,11 @@
+mod archive;
 mod config;
 mod logging;
 mod metrics;
 mod models;
 mod mqtt;
 mod parser;
+mod position;
 mod serial;
 mod service;
 mod tcp;
@@ -24,7 +26,7 @@ use std::{
 };
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[derive(Debug, Options)]
 struct Opts {
@@ -81,9 +83,14 @@ async fn main() -> Result<()> {
     // GPS event → state + forward to MQTT (None when MQTT disabled)
     {
         let state = Arc::clone(&app_state);
-        let data_tx = if config.mqtt_enabled { Some(gps_data_tx) } else { None };
+        let telemetry_log = config.telemetry_log.clone();
+        let data_tx = if config.mqtt_enabled {
+            Some(gps_data_tx)
+        } else {
+            None
+        };
         tokio::spawn(async move {
-            process_gps_events(gps_event_rx, state, data_tx).await;
+            process_gps_events(gps_event_rx, state, data_tx, telemetry_log).await;
         });
     }
 
@@ -161,10 +168,13 @@ async fn process_gps_events(
     mut event_rx: mpsc::Receiver<GpsEvent>,
     state: Arc<RwLock<AppState>>,
     data_tx: Option<mpsc::Sender<GpsData>>,
+    telemetry_log: Option<String>,
 ) {
+    let mut position = position::PositionEncoder::new();
     while let Some(event) = event_rx.recv().await {
         let mut state_guard = state.write().await;
 
+        state_guard.gps_data.position_packet = None;
         match event {
             GpsEvent::SatelliteUpdate(sat) => {
                 state_guard.gps_data.update_satellite(sat);
@@ -225,6 +235,7 @@ async fn process_gps_events(
                 state_guard.serial_connected = true;
             }
             GpsEvent::RawNmea(sentence) => {
+                state_guard.gps_data.position_packet = position.sentence(&sentence);
                 state_guard.gps_data.add_raw_nmea(sentence);
                 state_guard.serial_connected = true;
             }
@@ -253,9 +264,15 @@ async fn process_gps_events(
         state_guard.gps_data.satellites_in_view =
             Some(state_guard.gps_data.satellites.len() as u32);
 
+        if let Some(ref packet) = state_guard.gps_data.position_packet {
+            archive::record(telemetry_log.as_deref(), packet).await;
+        }
         if let Some(ref tx) = data_tx {
-            if let Err(e) = tx.send(state_guard.gps_data.clone()).await {
-                warn!("Failed to send GPS data to MQTT publisher: {}", e);
+            if let Err(e) = tx.try_send(state_guard.gps_data.clone()) {
+                tracing::debug!(
+                    "MQTT live queue unavailable; local capture continues: {}",
+                    e
+                );
             }
         }
     }

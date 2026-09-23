@@ -92,6 +92,7 @@ pub struct FixData {
 /// Complete GPS state
 #[derive(Debug, Clone, Default)]
 pub struct GpsData {
+    pub position_packet: Option<String>,
     pub navigation: NavigationData,
     pub fix: FixData,
     pub satellites: HashMap<u32, SatelliteInfo>,
