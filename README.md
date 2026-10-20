@@ -79,6 +79,7 @@ sudo dnf install gps-to-mqtt
 
 ```bash
 brew tap askrejans/g86racing
+brew trust askrejans/g86racing        # Homebrew asks once for third-party taps
 brew install gps-to-mqtt
 brew services start askrejans/g86racing/gps-to-mqtt   # optional background service
 ```
