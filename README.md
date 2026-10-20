@@ -57,7 +57,7 @@ Pre-built packages, no Rust toolchain needed.
 **Debian / Ubuntu**
 
 ```bash
-curl -fsSL https://g86racing.com/packages/apt/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/g86racing-archive-keyring.gpg
+curl -fsSL https://g86racing.com/packages/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/g86racing-archive-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/g86racing-archive-keyring.gpg] https://g86racing.com/packages/apt stable main" | sudo tee /etc/apt/sources.list.d/g86racing.list
 sudo apt update && sudo apt install gps-to-mqtt
 ```
