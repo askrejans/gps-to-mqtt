@@ -33,6 +33,14 @@
 
 set -euo pipefail
 
+# Prefer the rustup-managed toolchain: cross mounts the active toolchain into
+# Docker (a Homebrew rust under /opt/homebrew/Cellar is not shareable), and
+# rustup provides the std libraries for the other macOS/Windows targets.
+if command -v rustup >/dev/null 2>&1; then
+    RUSTUP_CARGO="$(rustup which cargo 2>/dev/null || true)"
+    [[ -n "$RUSTUP_CARGO" ]] && export PATH="$(dirname "$RUSTUP_CARGO"):$PATH"
+fi
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -189,6 +197,9 @@ check_docker() {
         # cross Docker images are x86_64-only. On Apple Silicon, tell Docker to
         # pull and run the amd64 image via Rosetta emulation (transparent, fast).
         export DOCKER_DEFAULT_PLATFORM=linux/amd64
+        # cross mounts the host cargo registry; make sure every crate source
+        # of the lockfile is extracted there before the containers compile.
+        (cd "$PROJECT_DIR" && cargo fetch --locked) || die "cargo fetch failed"
     fi
 }
 
@@ -239,7 +250,7 @@ build_deb() {
     require_cmd dpkg-deb "Install: sudo apt-get install dpkg-dev  OR  brew install dpkg"
 
     local bin_path
-    bin_path="$(build_binary "$target")"
+    bin_path="$(build_binary "$target")" || return 1
     local deb_arch
     deb_arch="$(deb_arch_of "$target")"
 
@@ -322,7 +333,7 @@ build_rpm() {
     require_cmd rpmbuild "Install (Fedora/RHEL): sudo dnf install rpm-build  OR  brew install rpm"
 
     local bin_path
-    bin_path="$(build_binary "$target")"
+    bin_path="$(build_binary "$target")" || return 1
     local rpm_arch
     rpm_arch="$(rpm_arch_of "$target")"
 
@@ -460,7 +471,7 @@ EOF
 build_win_zip() {
     local target="$1"   # win-x64
     local bin_path
-    bin_path="$(build_binary "$target")"
+    bin_path="$(build_binary "$target")" || return 1
 
     local arch_label
     case "$target" in
@@ -502,7 +513,7 @@ EOF
 build_mac_targz() {
     local target="$1"   # mac-x64 or mac-arm64
     local bin_path
-    bin_path="$(build_binary "$target")"
+    bin_path="$(build_binary "$target")" || return 1
 
     local arch_label
     case "$target" in
@@ -552,8 +563,8 @@ for target in "${LINUX_TARGETS[@]:-}"; do
         targz) warn "targz not applicable to Linux targets" ;;
         zip)   warn "zip not applicable to Linux targets" ;;
         all)
-            build_deb "$target" || warn "DEB build failed for $target"
-            build_rpm "$target" || warn "RPM build failed for $target"
+            build_deb "$target" || die "DEB build failed for $target"
+            build_rpm "$target" || die "RPM build failed for $target"
             ;;
     esac
 done
@@ -563,7 +574,7 @@ for target in "${WIN_TARGETS[@]:-}"; do
     [[ -z "$target" ]] && continue
     log "=== Windows target: $target ==="
     case "$PKG_TYPE" in
-        zip|all) build_win_zip "$target" || warn "Windows ZIP failed for $target" ;;
+        zip|all) build_win_zip "$target" || die "Windows ZIP failed for $target" ;;
         deb|rpm) warn "deb/rpm not applicable to Windows targets" ;;
     esac
 done
@@ -573,7 +584,7 @@ for target in "${MAC_TARGETS[@]:-}"; do
     [[ -z "$target" ]] && continue
     log "=== macOS target: $target ==="
     case "$PKG_TYPE" in
-        targz|all) build_mac_targz "$target" || warn "macOS tar.gz failed for $target" ;;
+        targz|all) build_mac_targz "$target" || die "macOS tar.gz failed for $target" ;;
         deb|rpm)   warn "deb/rpm not applicable to macOS targets" ;;
     esac
 done
