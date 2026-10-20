@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0
+## 0.7.1
 
 ### Added
 - On-demand position for consumers on slow links. Publish a reply topic to
