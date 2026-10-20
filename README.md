@@ -146,6 +146,18 @@ Select any combination with `mqtt_formats`:
 | `homeassistant` | `homeassistant/device_tracker/…`, `homeassistant/sensor/…` | Discovery: location tracker plus speed, altitude, satellites, HDOP, accuracy, fix quality/mode, MGRS |
 | `owntracks` | `owntracks/gps-to-mqtt/<base>` | `_type: location` for Home Assistant, Traccar, OwnTracks Recorder |
 
+**On demand.** A consumer on a slow link (the G86-ESP-DSP display) publishes
+its own reply topic as the payload to `<base>/position/get`. gps-to-mqtt
+answers once on that topic with the latest valid fix younger than 2 s (QoS 0,
+not retained; no answer without one):
+`{"schema":1,"source":"gps-to-mqtt","timestampMs","latitude","longitude","speedMps","headingDeg","lateralG","longitudinalG","channels":{…}}`.
+`channels` holds every other numeric value of the fix in canonical names:
+`gpsSpeedKmh`, `altitudeM`, `accuracyM`, `satellitesUsed`, `satellitesInView`,
+`hdop`, `vdop`, `pdop`, `rateOfTurnDps`, `combinedG`, `yawRateDps`,
+`distanceM`, `maxSpeedKmh`. Missing values are left out. The consumer asks
+again after using the answer, so no backlog builds up. Answers are rate
+limited to one per 10 ms per reply topic, for up to 32 reply topics.
+
 `<base>/status` is `online`/`offline` (retained, with a last will). Use
 `mqtt_max_rate_hz` to throttle state topics on slow links. TLS: `mqtt_use_tls`,
 `mqtt_ca_file`, and `mqtt_client_cert_file` + `mqtt_client_key_file` for

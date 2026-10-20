@@ -13,6 +13,13 @@
 //! Availability: `<base>/status` is `online`/`offline` (retained; `offline` is the
 //! broker-published last will).
 //!
+//! **On demand** (for consumers on slow links, such as the G86 display): a
+//! message on `<base>/position/get` whose payload is a reply topic is answered
+//! with the latest valid fix on that topic: `latitude`, `longitude`,
+//! `speedMps`, `headingDeg`, `lateralG`, `longitudinalG`, `timestampMs`.
+//! The consumer asks again when it has used the answer, so it never builds a
+//! backlog. No answer without a valid fix from the last 2 s.
+//!
 //! Publishing never blocks the pipeline: while the broker is unreachable live
 //! values are dropped and counted, and every retained state topic is re-sent
 //! after reconnecting.
@@ -379,6 +386,66 @@ fn sanitize(s: &str) -> String {
 
 // ── Runtime ──────────────────────────────────────────────────────────────
 
+const DEMAND_MIN_INTERVAL: Duration = Duration::from_millis(10);
+const DEMAND_MAX_CLIENTS: usize = 32;
+const DEMAND_MAX_AGE_S: f64 = 2.0;
+
+/// A usable reply topic: 1–128 bytes of UTF-8, no wildcards, not a `$` system topic.
+pub fn valid_reply_topic(payload: &[u8]) -> Option<&str> {
+    let t = std::str::from_utf8(payload).ok()?.trim();
+    (!t.is_empty() && t.len() <= 128 && !t.contains(['+', '#', '\0']) && !t.starts_with('$'))
+        .then_some(t)
+}
+
+/// The latest valid fix for an on-demand request; `None` when there is none.
+pub fn demand_reply(shared: &Shared) -> Option<String> {
+    let s = shared.read();
+    if s.fix_age_s(Instant::now())? > DEMAND_MAX_AGE_S {
+        return None;
+    }
+    let fix = s.fix.as_ref()?;
+    let (lat, lon) = (fix.latitude?, fix.longitude?);
+    if !fix.valid {
+        return None;
+    }
+    let t = fix.telemetry.as_ref();
+    // Every other numeric value of the fix, for displays that show any channel.
+    let mut channels = serde_json::Map::new();
+    let mut put = |name: &str, v: Option<f64>| {
+        if let Some(v) = v.filter(|v| v.is_finite()) {
+            channels.insert(name.into(), json!(v));
+        }
+    };
+    put("gpsSpeedKmh", fix.speed_mps.map(|v| v * 3.6));
+    put("altitudeM", fix.altitude_m);
+    put("accuracyM", fix.accuracy_m);
+    put("satellitesUsed", fix.satellites_used.map(f64::from));
+    put("satellitesInView", fix.satellites_in_view.map(f64::from));
+    put("hdop", fix.hdop);
+    put("vdop", fix.vdop);
+    put("pdop", fix.pdop);
+    put("rateOfTurnDps", fix.rate_of_turn_dps);
+    put("combinedG", t.and_then(|t| t.combined_g));
+    put("yawRateDps", t.and_then(|t| t.yaw_rate_dps));
+    put("distanceM", t.map(|t| t.distance_m));
+    put("maxSpeedKmh", t.map(|t| t.max_speed_mps * 3.6));
+    Some(
+        json!({
+            "schema": 1,
+            "source": "gps-to-mqtt",
+            "timestampMs": fix.received_ms,
+            "latitude": lat,
+            "longitude": lon,
+            "speedMps": fix.speed_mps,
+            "headingDeg": fix.course_deg.or(fix.heading_deg),
+            "lateralG": t.and_then(|t| t.lateral_g),
+            "longitudinalG": t.and_then(|t| t.longitudinal_g),
+            "channels": channels,
+        })
+        .to_string(),
+    )
+}
+
 pub async fn run(config: AppConfig, shared: Arc<Shared>, cancel: CancellationToken) -> Result<()> {
     let id = client_id(&config);
     let opts = options(&config, &id)?;
@@ -389,8 +456,14 @@ pub async fn run(config: AppConfig, shared: Arc<Shared>, cancel: CancellationTok
     // Event loop: drives the connection, reconnects with backoff.
     let el_shared = shared.clone();
     let el_cancel = cancel.clone();
+    let el_client = client.clone();
+    let demand_topic = format!(
+        "{}/position/get",
+        config.mqtt_base_topic.trim_end_matches('/')
+    );
     let max_attempts = config.mqtt_reconnect_max_attempts;
     let event_loop = tokio::spawn(async move {
+        let mut answered: HashMap<String, Instant> = HashMap::new();
         let mut delay = Duration::from_secs(1);
         let mut failures = 0u32;
         let mut generation = 0u64;
@@ -409,11 +482,37 @@ pub async fn run(config: AppConfig, shared: Arc<Shared>, cancel: CancellationTok
             match polled {
                 Ok(Event::Incoming(Packet::ConnAck(ack))) => {
                     info!("MQTT connected ({:?})", ack.code);
+                    let _ = el_client.try_subscribe(demand_topic.clone(), QoS::AtMostOnce);
                     delay = Duration::from_secs(1);
                     failures = 0;
                     generation += 1;
                     let _ = conn_tx.send(generation);
                     el_shared.set_mqtt(LinkStatus::Connected);
+                }
+                Ok(Event::Incoming(Packet::Publish(p))) if p.topic == demand_topic => {
+                    let Some(reply) = valid_reply_topic(&p.payload) else {
+                        continue;
+                    };
+                    let now = Instant::now();
+                    if answered
+                        .get(reply)
+                        .is_some_and(|t| now.duration_since(*t) < DEMAND_MIN_INTERVAL)
+                    {
+                        continue;
+                    }
+                    if answered.len() >= DEMAND_MAX_CLIENTS && !answered.contains_key(reply) {
+                        answered.retain(|_, t| now.duration_since(*t) < Duration::from_secs(10));
+                        if answered.len() >= DEMAND_MAX_CLIENTS {
+                            continue;
+                        }
+                    }
+                    answered.insert(reply.to_string(), now);
+                    if let Some(doc) = demand_reply(&el_shared) {
+                        match el_client.try_publish(reply, QoS::AtMostOnce, false, doc) {
+                            Ok(()) => Counters::inc(&el_shared.counters.mqtt_published),
+                            Err(_) => Counters::inc(&el_shared.counters.mqtt_dropped),
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -695,6 +794,38 @@ mod tests {
             }),
             ..Fix::default()
         }
+    }
+
+    #[test]
+    fn demand_reply_topics_are_validated() {
+        assert_eq!(
+            valid_reply_topic(b"/GOLF86/DISPLAY/x/gps"),
+            Some("/GOLF86/DISPLAY/x/gps")
+        );
+        for bad in [&b""[..], b"a/+", b"#", b"$SYS/x"] {
+            assert_eq!(valid_reply_topic(bad), None);
+        }
+    }
+
+    #[test]
+    fn demand_reply_needs_a_fresh_valid_fix() {
+        use crate::shared::Info;
+        let shared = Shared::new(Info::default(), true);
+        assert_eq!(demand_reply(&shared), None);
+        {
+            let mut s = shared.write();
+            s.fix = Some(Arc::new(fix()));
+            s.last_fix_at = Some(Instant::now());
+        }
+        let doc: serde_json::Value =
+            serde_json::from_str(&demand_reply(&shared).expect("fresh fix")).unwrap();
+        assert_eq!(doc["schema"], 1);
+        assert!(doc["latitude"].is_number() && doc["longitude"].is_number());
+        assert_eq!(doc["channels"]["altitudeM"], 12.04);
+        assert_eq!(doc["channels"]["hdop"], 0.8);
+        assert!(doc["channels"]["gpsSpeedKmh"].is_number());
+        shared.write().last_fix_at = Some(Instant::now() - Duration::from_secs(5));
+        assert_eq!(demand_reply(&shared), None, "a stale fix is not answered");
     }
 
     #[test]

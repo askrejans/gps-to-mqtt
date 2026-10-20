@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+- On-demand position for consumers on slow links. Publish a reply topic to
+  `<base>/position/get` to receive the latest valid fix younger than 2 s on it
+  (QoS 0, not retained): position, speed, heading, lateral and longitudinal G,
+  and a `channels` object with every other numeric value (altitude, accuracy,
+  satellites, DOPs, combined G, yaw rate, distance, max speed). The consumer asks
+  again after each answer, so it never builds a backlog. Answers are rate limited
+  to one per 10 ms per reply topic, for up to 32 reply topics. Used by
+  G86-ESP-DSP 0.2.
+
 ## 0.7.0
 
 ### Contract changes
