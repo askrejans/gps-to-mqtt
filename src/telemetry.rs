@@ -1,183 +1,132 @@
-use crate::models::{GpsData, TelemetryMetrics};
+//! Vehicle dynamics derived from consecutive fixes.
+//!
+//! Computed exactly once per emitted [`Fix`], using receiver UTC time for Δt
+//! (host arrival time only when the receiver gives no date/time), so serial
+//! buffering or network jitter does not distort derivatives.
+
+use crate::models::{Fix, Telemetry};
 use std::collections::VecDeque;
-use std::time::Instant;
-use tracing::trace;
 
-const GRAVITY: f64 = 9.81; // m/s²
-const KPH_TO_MPS: f64 = 1.0 / 3.6;
-
-// Minimum speed before any dynamics are computed.
-// Below this threshold GPS course noise dominates and Δv/Δt is meaningless.
-const MIN_SPEED_KPH: f64 = 3.0;
-
-// Braking detection threshold: deceleration stronger than this (m/s²) = braking.
-// ~0.5 m/s² ≈ light trail braking; hard braking is typically > 5 m/s².
+const GRAVITY: f64 = 9.806_65;
+/// Below this speed course noise dominates and Δv/Δt is meaningless.
+const MIN_SPEED_MPS: f64 = 3.0 / 3.6;
+/// Deceleration stronger than this (m/s²) is reported as braking.
 const BRAKING_THRESHOLD_MPS2: f64 = -0.5;
+/// Gaps longer than this restart the derivative window.
+const MAX_GAP_S: f64 = 2.5;
 
-/// One GPS epoch stored for derivative calculations.
 #[derive(Debug, Clone)]
-struct DataPoint {
-    speed_mps: f64,  // already converted
-    course_deg: f64, // 0-360
-    latitude: f64,
-    longitude: f64,
-    timestamp: Instant,
+struct Sample {
+    /// Milliseconds (integer: f64 seconds since 1970 lose sub-µs precision).
+    t_ms: i64,
+    speed: f64,
+    course: f64,
+    lat: f64,
+    lon: f64,
 }
 
-/// Derived telemetry — calculated once per GPS epoch, never recalculated.
 pub struct TelemetryCalculator {
-    /// Ring buffer of the last `window_size` valid (speed > threshold) epochs.
-    history: VecDeque<DataPoint>,
-    window_size: usize,
-    total_distance: f64,
-    max_speed_kph: f64,
-    /// Latest ROT from dedicated NMEA ROT sentence (deg/min), overrides course diff.
-    last_rot_deg_per_min: Option<f64>,
-    /// Last emitted metrics — returned unchanged when speed < threshold.
-    last_metrics: TelemetryMetrics,
+    history: VecDeque<Sample>,
+    window: usize,
+    distance_m: f64,
+    max_speed_mps: f64,
 }
 
 impl TelemetryCalculator {
-    pub fn new(window_size: usize) -> Self {
-        let ws = window_size.max(2);
+    pub fn new(window: usize) -> Self {
+        let window = window.max(2);
         Self {
-            history: VecDeque::with_capacity(ws),
-            window_size: ws,
-            total_distance: 0.0,
-            max_speed_kph: 0.0,
-            last_rot_deg_per_min: None,
-            last_metrics: TelemetryMetrics::default(),
+            history: VecDeque::with_capacity(window),
+            window,
+            distance_m: 0.0,
+            max_speed_mps: 0.0,
         }
     }
 
-    /// Feed a new GPS epoch.  Returns updated metrics.
-    /// Called once per RMC/GGA/VTG update — no repeated recalculation.
-    pub fn update(&mut self, gps_data: &GpsData) -> TelemetryMetrics {
-        let speed_kph = gps_data.navigation.speed_kph.unwrap_or(0.0);
-        let lat = gps_data.navigation.latitude.unwrap_or(0.0);
-        let lon = gps_data.navigation.longitude.unwrap_or(0.0);
-
-        // Track session max speed regardless of threshold
-        if speed_kph > self.max_speed_kph {
-            self.max_speed_kph = speed_kph;
+    pub fn update(&mut self, fix: &Fix) -> Telemetry {
+        let mut out = Telemetry {
+            distance_m: self.distance_m,
+            max_speed_mps: self.max_speed_mps,
+            ..Telemetry::default()
+        };
+        let (Some((lat, lon)), Some(speed)) = (fix.position(), fix.speed_mps) else {
+            self.history.clear();
+            return out;
+        };
+        if !fix.quality.is_measured() {
+            self.history.clear();
+            return out;
         }
 
-        // Only accumulate distance and history when we have a real fix and are moving
-        let has_fix = lat != 0.0 || lon != 0.0;
-        let is_moving = speed_kph >= MIN_SPEED_KPH;
+        self.max_speed_mps = self.max_speed_mps.max(speed);
+        out.max_speed_mps = self.max_speed_mps;
 
-        if has_fix && is_moving {
-            // Distance — integrate between consecutive valid positions
-            if let Some(prev) = self.history.back() {
-                let d = haversine(prev.latitude, prev.longitude, lat, lon);
-                // Sanity-check: GPS noise / teleport guard (max ~300 m/s = 1080 km/h)
-                if d < speed_kph * KPH_TO_MPS * 2.0 + 50.0 {
-                    self.total_distance += d;
+        let t_ms = fix
+            .time
+            .map(|t| t.timestamp_millis())
+            .unwrap_or(fix.received_ms);
+
+        if speed < MIN_SPEED_MPS {
+            // Stationary: clear so stale deltas don't produce a spike on pull-away.
+            self.history.clear();
+            return out;
+        }
+
+        if let Some(prev) = self.history.back() {
+            let dt = (t_ms - prev.t_ms) as f64 / 1000.0;
+            if dt <= 0.0 || dt > MAX_GAP_S {
+                self.history.clear();
+            } else {
+                let d = haversine(prev.lat, prev.lon, lat, lon);
+                // Teleport guard: reject jumps beyond 2× the plausible travel.
+                if d <= speed.max(prev.speed) * dt * 2.0 + 5.0 {
+                    self.distance_m += d;
                 }
             }
+        }
+        out.distance_m = self.distance_m;
 
-            let course = gps_data.navigation.course.unwrap_or(0.0);
-            let pt = DataPoint {
-                speed_mps: speed_kph * KPH_TO_MPS,
-                course_deg: course,
-                latitude: lat,
-                longitude: lon,
-                timestamp: Instant::now(),
-            };
-            self.history.push_back(pt);
-            if self.history.len() > self.window_size {
-                self.history.pop_front();
-            }
-        } else if !is_moving {
-            // Vehicle stopped — clear dynamics history so stale deltas don't
-            // produce spurious acceleration on the next move.
-            self.history.clear();
+        self.history.push_back(Sample {
+            t_ms,
+            speed,
+            course: fix.course_deg.unwrap_or(0.0),
+            lat,
+            lon,
+        });
+        while self.history.len() > self.window {
+            self.history.pop_front();
         }
 
-        // ── Compute derivatives ──────────────────────────────────────────────
-        let mut metrics = TelemetryMetrics {
-            distance_traveled: self.total_distance,
-            max_speed_kph: if self.max_speed_kph > 0.0 {
-                Some(self.max_speed_kph)
-            } else {
-                None
-            },
-            ..Default::default()
+        let (Some(oldest), Some(newest)) = (self.history.front(), self.history.back()) else {
+            return out;
         };
-
-        if self.history.len() >= 2 {
-            let newest = self.history.back().unwrap();
-            let oldest = self.history.front().unwrap();
-
-            let dt = newest
-                .timestamp
-                .duration_since(oldest.timestamp)
-                .as_secs_f64();
-
-            if dt >= 0.05 {
-                // ── Longitudinal acceleration (Δv / Δt over window) ─────────
-                let dv = newest.speed_mps - oldest.speed_mps;
-                let long_accel = dv / dt; // m/s²
-
-                metrics.longitudinal_accel = Some(long_accel);
-                metrics.longitudinal_g = Some(long_accel / GRAVITY);
-                metrics.is_braking = long_accel < BRAKING_THRESHOLD_MPS2;
-
-                // ── Heading rate (°/s, shortest-path wrap) ───────────────────
-                let heading_rate_deg_s = if let Some(rot) = self.last_rot_deg_per_min {
-                    // Prefer dedicated ROT sentence for accuracy
-                    rot / 60.0
-                } else {
-                    let mut dh = newest.course_deg - oldest.course_deg;
-                    // Normalise to (-180, +180]
-                    while dh > 180.0 {
-                        dh -= 360.0;
-                    }
-                    while dh < -180.0 {
-                        dh += 360.0;
-                    }
-                    dh / dt
-                };
-
-                metrics.heading_rate = Some(heading_rate_deg_s);
-
-                // ── Lateral acceleration: a_lat = v × ω  (centripetal) ──────
-                // ω in rad/s, v in m/s → a_lat in m/s²
-                let omega = heading_rate_deg_s.to_radians(); // rad/s
-                let v = newest.speed_mps;
-                let lat_accel = v * omega; // m/s²
-
-                metrics.lateral_accel = Some(lat_accel);
-                metrics.lateral_g = Some(lat_accel / GRAVITY);
-
-                // ── Combined g ───────────────────────────────────────────────
-                let long_g = long_accel / GRAVITY;
-                let lat_g = lat_accel / GRAVITY;
-                metrics.combined_g = Some((long_g * long_g + lat_g * lat_g).sqrt());
-            }
+        let dt = (newest.t_ms - oldest.t_ms) as f64 / 1000.0;
+        if self.history.len() < 2 || dt < 0.05 {
+            return out;
         }
 
-        trace!("Telemetry: {:?}", metrics);
-        self.last_metrics = metrics.clone();
-        metrics
-    }
+        let long = (newest.speed - oldest.speed) / dt;
+        let yaw = fix.rate_of_turn_dps.unwrap_or_else(|| {
+            let mut dh = newest.course - oldest.course;
+            dh = (dh + 180.0).rem_euclid(360.0) - 180.0;
+            dh / dt
+        });
+        let lat_accel = newest.speed * yaw.to_radians();
 
-    /// Feed a ROT (rate-of-turn) sentence value in degrees/minute.
-    /// Stored and used instead of the course-difference estimate on the next update.
-    pub fn update_rate_of_turn(&mut self, rate_deg_per_min: f64) {
-        self.last_rot_deg_per_min = Some(rate_deg_per_min);
-    }
-
-    /// Reset odometer (e.g. new lap start).
-    #[allow(dead_code)]
-    pub fn reset_distance(&mut self) {
-        self.total_distance = 0.0;
+        out.longitudinal_accel_mps2 = Some(long);
+        out.longitudinal_g = Some(long / GRAVITY);
+        out.lateral_accel_mps2 = Some(lat_accel);
+        out.lateral_g = Some(lat_accel / GRAVITY);
+        out.combined_g = Some(long.hypot(lat_accel) / GRAVITY);
+        out.yaw_rate_dps = Some(yaw);
+        out.braking = long < BRAKING_THRESHOLD_MPS2;
+        out
     }
 }
 
-/// Haversine distance between two coordinates, metres.
-fn haversine(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    const R: f64 = 6_371_000.0;
+/// Great-circle distance in metres.
+pub fn haversine(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const R: f64 = 6_371_008.8;
     let dlat = (lat2 - lat1).to_radians();
     let dlon = (lon2 - lon1).to_radians();
     let a = (dlat / 2.0).sin().powi(2)
@@ -188,119 +137,92 @@ fn haversine(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::FixQuality;
+    use chrono::{TimeZone, Utc};
 
-    #[test]
-    fn test_haversine_known_distance() {
-        let d = haversine(0.0, 0.0, 1.0, 0.0);
-        assert!((d - 111_195.0).abs() < 200.0);
+    fn fix(ms: i64, lat: f64, speed_mps: f64, course: f64) -> Fix {
+        Fix {
+            time: Some(Utc.timestamp_millis_opt(1_790_164_800_000 + ms).unwrap()),
+            valid: true,
+            quality: FixQuality::Gps,
+            latitude: Some(lat),
+            longitude: Some(24.0),
+            speed_mps: Some(speed_mps),
+            course_deg: Some(course),
+            ..Fix::default()
+        }
     }
 
     #[test]
-    fn test_haversine_same_point() {
-        assert!(haversine(40.7128, -74.006, 40.7128, -74.006) < 0.1);
+    fn haversine_known_distance() {
+        assert!((haversine(0.0, 0.0, 1.0, 0.0) - 111_195.0).abs() < 200.0);
+        assert!(haversine(40.0, -74.0, 40.0, -74.0) < 0.01);
     }
 
     #[test]
-    fn test_first_update_no_dynamics() {
-        let mut calc = TelemetryCalculator::new(3);
-        let metrics = calc.update(&GpsData::default());
-        assert!(metrics.longitudinal_accel.is_none());
-        assert!(metrics.lateral_accel.is_none());
-        assert!(metrics.combined_g.is_none());
-        assert!(metrics.longitudinal_g.is_none());
-        assert!(metrics.lateral_g.is_none());
-    }
-
-    #[test]
-    fn test_below_threshold_no_dynamics() {
-        // 2 km/h < MIN_SPEED_KPH — history should stay empty, no accel
-        let mut calc = TelemetryCalculator::new(3);
-        let mut gps = GpsData::default();
-        gps.navigation.latitude = Some(1.0);
-        gps.navigation.longitude = Some(1.0);
-        gps.navigation.speed_kph = Some(2.0);
-        calc.update(&gps);
-        gps.navigation.speed_kph = Some(2.5);
-        let m = calc.update(&gps);
-        assert!(m.longitudinal_accel.is_none());
-    }
-
-    #[test]
-    fn test_max_speed_retained() {
-        let mut calc = TelemetryCalculator::new(3);
-        let mut gps = GpsData::default();
-        gps.navigation.latitude = Some(1.0);
-        gps.navigation.longitude = Some(1.0);
-
-        gps.navigation.speed_kph = Some(50.0);
-        calc.update(&gps);
-        gps.navigation.speed_kph = Some(120.0);
-        calc.update(&gps);
-        gps.navigation.speed_kph = Some(80.0);
-        let m = calc.update(&gps);
-        assert_eq!(m.max_speed_kph, Some(120.0));
-    }
-
-    #[test]
-    fn test_is_braking_flag() {
-        let mut calc = TelemetryCalculator::new(5);
-        let mut gps = GpsData::default();
-        gps.navigation.latitude = Some(1.0);
-        gps.navigation.longitude = Some(1.0);
-        gps.navigation.course = Some(0.0);
-
-        // Establish history at 100 km/h — need real time gap so dt >= 50ms
-        gps.navigation.speed_kph = Some(100.0);
-        calc.update(&gps);
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        gps.navigation.speed_kph = Some(100.0);
-        calc.update(&gps);
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        // Hard stop to 10 km/h
-        gps.navigation.speed_kph = Some(10.0);
-        let m = calc.update(&gps);
-        // Should be braking (large negative accel)
-        assert!(m.is_braking, "expected braking flag");
-        assert!(m.longitudinal_accel.unwrap() < BRAKING_THRESHOLD_MPS2);
-    }
-
-    #[test]
-    fn test_rot_overrides_course_diff() {
-        let mut calc = TelemetryCalculator::new(3);
-        calc.update_rate_of_turn(120.0); // 2 °/s
-        // Just must not panic
-    }
-
-    #[test]
-    fn test_distance_only_accumulates_above_threshold() {
-        let mut calc = TelemetryCalculator::new(3);
-        let mut gps = GpsData::default();
-
-        // Stationary — should not accumulate
-        gps.navigation.latitude = Some(51.0);
-        gps.navigation.longitude = Some(0.0);
-        gps.navigation.speed_kph = Some(0.0);
-        calc.update(&gps);
-        // Even if position changes, distance should not accumulate when stopped
-        gps.navigation.latitude = Some(51.001);
-        let m = calc.update(&gps);
-        assert_eq!(m.distance_traveled, 0.0, "stationary move should not count");
-
-        // Now moving at 50 km/h (~13.9 m/s).  Move ~14m north — realistic 1s epoch.
-        // 1 degree lat ≈ 111 km → 0.000125 deg ≈ ~14 m
-        gps.navigation.speed_kph = Some(50.0);
-        gps.navigation.latitude = Some(51.001);
-        gps.navigation.longitude = Some(0.0);
-        calc.update(&gps);
-        gps.navigation.latitude = Some(51.001125); // ~12.5 m north
-        let m = calc.update(&gps);
+    fn longitudinal_accel_uses_receiver_time() {
+        let mut c = TelemetryCalculator::new(2);
         assert!(
-            m.distance_traveled > 0.0,
-            "distance should accumulate when moving"
+            c.update(&fix(0, 56.0, 10.0, 90.0))
+                .longitudinal_accel_mps2
+                .is_none()
         );
+        let t = c.update(&fix(100, 56.0000090, 11.0, 90.0));
+        assert!((t.longitudinal_accel_mps2.unwrap() - 10.0).abs() < 1e-6);
+        assert!(!t.braking);
+        let t = c.update(&fix(200, 56.0000180, 10.0, 90.0));
+        assert!(t.braking);
+        assert!(t.distance_m > 1.5 && t.distance_m < 2.5);
+    }
+
+    #[test]
+    fn lateral_from_course_change_with_wrap() {
+        let mut c = TelemetryCalculator::new(2);
+        c.update(&fix(0, 56.0, 20.0, 359.0));
+        let t = c.update(&fix(1000, 56.00018, 20.0, 9.0));
+        assert!((t.yaw_rate_dps.unwrap() - 10.0).abs() < 1e-9);
+        let expected = 20.0 * 10f64.to_radians();
+        assert!((t.lateral_accel_mps2.unwrap() - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rot_overrides_course_difference() {
+        let mut c = TelemetryCalculator::new(2);
+        c.update(&fix(0, 56.0, 20.0, 0.0));
+        let mut f = fix(1000, 56.00018, 20.0, 50.0);
+        f.rate_of_turn_dps = Some(-2.0);
+        assert_eq!(c.update(&f).yaw_rate_dps, Some(-2.0));
+    }
+
+    #[test]
+    fn stationary_invalid_and_gaps_reset_dynamics() {
+        let mut c = TelemetryCalculator::new(3);
+        c.update(&fix(0, 56.0, 20.0, 0.0));
         assert!(
-            m.distance_traveled < 100.0,
-            "distance should be realistic, not teleport"
+            c.update(&fix(100, 56.0, 0.1, 0.0))
+                .longitudinal_accel_mps2
+                .is_none()
         );
+        c.update(&fix(200, 56.0, 20.0, 0.0));
+        assert!(
+            c.update(&fix(5000, 56.0, 25.0, 0.0))
+                .longitudinal_accel_mps2
+                .is_none()
+        );
+        let mut invalid = fix(5100, 56.0, 30.0, 0.0);
+        invalid.valid = false;
+        assert!(c.update(&invalid).longitudinal_accel_mps2.is_none());
+        let mut dr = fix(5200, 56.0, 30.0, 0.0);
+        dr.quality = FixQuality::Estimated;
+        assert!(c.update(&dr).longitudinal_accel_mps2.is_none());
+    }
+
+    #[test]
+    fn teleport_is_not_counted_and_max_speed_kept() {
+        let mut c = TelemetryCalculator::new(3);
+        c.update(&fix(0, 56.0, 30.0, 0.0));
+        let t = c.update(&fix(100, 57.0, 10.0, 0.0));
+        assert_eq!(t.distance_m, 0.0);
+        assert_eq!(t.max_speed_mps, 30.0);
     }
 }

@@ -1,32 +1,141 @@
-use chrono::{NaiveDate, NaiveTime};
-use std::collections::{BTreeMap, HashMap};
+//! Canonical, receiver-independent GNSS data model.
+//!
+//! Units are SI at rest (metres, metres/second, degrees, seconds). Unit
+//! conversions happen only at output boundaries.
 
-/// GNSS system type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum GnssSystem {
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use serde::Serialize;
+
+pub const MPS_TO_KPH: f64 = 3.6;
+pub const MPS_TO_MPH: f64 = 2.236_936_292_054_402;
+pub const MPS_TO_KNOTS: f64 = 1.943_844_492_440_604_7;
+pub const KNOTS_TO_MPS: f64 = 1852.0 / 3600.0;
+pub const M_TO_FT: f64 = 3.280_839_895;
+
+/// GNSS constellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Constellation {
     Gps,
+    Sbas,
     Glonass,
     Galileo,
     Beidou,
+    Qzss,
+    Navic,
     Unknown,
 }
 
-/// GPS fix type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FixType {
+impl Constellation {
+    /// Classify a satellite from its talker and PRN.
+    ///
+    /// Covers both the NMEA ≤4.0 extended numbering (everything under `GP`/`GN`
+    /// with GLONASS at 65–96 etc.) and NMEA 4.10+ per-system numbering.
+    pub fn classify(talker: &str, prn: u32) -> Self {
+        match talker {
+            "GL" => Self::Glonass,
+            "GA" => Self::Galileo,
+            "GB" | "BD" => Self::Beidou,
+            "GQ" | "QZ" => Self::Qzss,
+            "GI" => Self::Navic,
+            _ => match prn {
+                1..=32 => Self::Gps,
+                33..=64 | 120..=158 => Self::Sbas,
+                65..=96 => Self::Glonass,
+                193..=202 => Self::Qzss,
+                201..=263 | 401..=463 => Self::Beidou,
+                301..=336 => Self::Galileo,
+                _ => Self::Unknown,
+            },
+        }
+    }
+
+    /// NMEA 4.10 GNSS system ID (GSA field 18 / GSV last field).
+    pub fn from_system_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "1" => Self::Gps,
+            "2" => Self::Glonass,
+            "3" => Self::Galileo,
+            "4" => Self::Beidou,
+            "5" => Self::Qzss,
+            "6" => Self::Navic,
+            _ => return None,
+        })
+    }
+
+    /// RINEX-style one-letter prefix.
+    pub fn letter(self) -> char {
+        match self {
+            Self::Gps => 'G',
+            Self::Sbas => 'S',
+            Self::Glonass => 'R',
+            Self::Galileo => 'E',
+            Self::Beidou => 'C',
+            Self::Qzss => 'J',
+            Self::Navic => 'I',
+            Self::Unknown => '?',
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gps => "GPS",
+            Self::Sbas => "SBAS",
+            Self::Glonass => "GLONASS",
+            Self::Galileo => "Galileo",
+            Self::Beidou => "BeiDou",
+            Self::Qzss => "QZSS",
+            Self::Navic => "NavIC",
+            Self::Unknown => "Other",
+        }
+    }
+
+    /// gpsd `gnssid` numbering.
+    pub fn gpsd_id(self) -> u8 {
+        match self {
+            Self::Gps | Self::Unknown => 0,
+            Self::Sbas => 1,
+            Self::Galileo => 2,
+            Self::Beidou => 3,
+            Self::Qzss => 5,
+            Self::Glonass => 6,
+            Self::Navic => 7,
+        }
+    }
+}
+
+/// Dimensional fix mode (GSA).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum FixMode {
+    #[default]
+    #[serde(rename = "none")]
     NoFix,
+    #[serde(rename = "2d")]
     Fix2D,
+    #[serde(rename = "3d")]
     Fix3D,
-    Unknown,
 }
 
-/// GPS fix quality indicator
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl FixMode {
+    /// gpsd TPV `mode` (0 unknown, 1 no fix, 2 2D, 3 3D).
+    pub fn gpsd(self) -> u8 {
+        match self {
+            Self::NoFix => 1,
+            Self::Fix2D => 2,
+            Self::Fix3D => 3,
+        }
+    }
+}
+
+/// GGA fix quality indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FixQuality {
+    #[default]
     Invalid,
-    GpsFix,
-    DgpsFix,
-    PpsFix,
+    Gps,
+    Dgps,
+    Pps,
     Rtk,
     FloatRtk,
     Estimated,
@@ -34,236 +143,188 @@ pub enum FixQuality {
     Simulation,
 }
 
-/// Satellite information from GSV sentences
-#[derive(Debug, Clone)]
-pub struct SatelliteInfo {
-    pub prn: u32,
-    pub elevation: Option<i32>,
-    pub azimuth: Option<i32>,
-    pub snr: Option<i32>,
-    pub system: GnssSystem,
-    /// Wall-clock time the satellite was last reported by the receiver.
-    /// Used to expire phantom entries without ever clearing mid-cycle.
-    pub last_seen: std::time::Instant,
-}
+impl FixQuality {
+    pub fn from_gga(field: &str) -> Self {
+        match field {
+            "1" => Self::Gps,
+            "2" => Self::Dgps,
+            "3" => Self::Pps,
+            "4" => Self::Rtk,
+            "5" => Self::FloatRtk,
+            "6" => Self::Estimated,
+            "7" => Self::Manual,
+            "8" => Self::Simulation,
+            _ => Self::Invalid,
+        }
+    }
 
-impl Default for SatelliteInfo {
-    fn default() -> Self {
-        Self {
-            prn: 0,
-            elevation: None,
-            azimuth: None,
-            snr: None,
-            system: GnssSystem::Unknown,
-            last_seen: std::time::Instant::now(),
+    /// Mode indicator used by RMC/GNS/VTG/GLL (NMEA 2.3+).
+    pub fn from_mode_char(c: char) -> Option<Self> {
+        Some(match c {
+            'A' => Self::Gps,
+            'D' => Self::Dgps,
+            'P' => Self::Pps,
+            'R' => Self::Rtk,
+            'F' => Self::FloatRtk,
+            'E' => Self::Estimated,
+            'M' => Self::Manual,
+            'S' => Self::Simulation,
+            'N' => Self::Invalid,
+            _ => return None,
+        })
+    }
+
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// True for fixes from real measurements (excludes dead reckoning/manual/simulation).
+    pub fn is_measured(self) -> bool {
+        matches!(
+            self,
+            Self::Gps | Self::Dgps | Self::Pps | Self::Rtk | Self::FloatRtk
+        )
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Invalid => "Invalid",
+            Self::Gps => "GPS",
+            Self::Dgps => "DGPS",
+            Self::Pps => "PPS",
+            Self::Rtk => "RTK fixed",
+            Self::FloatRtk => "RTK float",
+            Self::Estimated => "Dead reckoning",
+            Self::Manual => "Manual",
+            Self::Simulation => "Simulation",
         }
     }
 }
 
-/// Position and navigation data
-#[derive(Debug, Clone, Default)]
-pub struct NavigationData {
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
-    pub altitude: Option<f64>,
-    pub speed_knots: Option<f64>,
-    pub speed_kph: Option<f64>,
-    pub course: Option<f64>,
-    #[allow(dead_code)]
-    pub magnetic_variation: Option<f64>,
-    pub heading_rate: Option<f64>,      // degrees/second
-    pub true_heading: Option<f64>,      // degrees (0-360)
-    pub position_accuracy: Option<f64>, // meters (from GST)
+/// Provenance of [`Fix::accuracy_m`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccuracySource {
+    /// 1-σ horizontal error reported by the receiver (GST).
+    Gst,
+    /// Receiver-estimated horizontal accuracy (u-blox PUBX,00 `hAcc`).
+    Receiver,
+    /// HDOP × 5 m (minimum 3 m) — a labelled estimate, not a measurement.
+    HdopEstimate,
 }
 
-/// GPS fix information
-#[derive(Debug, Clone, Default)]
-pub struct FixData {
-    pub fix_type: Option<FixType>,
-    pub fix_quality: Option<FixQuality>,
-    pub satellites_used: Option<u32>,
+/// One satellite as last reported by GSV.
+#[derive(Debug, Clone, Serialize)]
+pub struct Satellite {
+    pub constellation: Constellation,
+    pub prn: u32,
+    pub elevation_deg: Option<i32>,
+    pub azimuth_deg: Option<i32>,
+    pub snr_dbhz: Option<i32>,
+    pub used: bool,
+}
+
+impl Satellite {
+    /// Stable identifier such as `G07`, `R65`, `E11`.
+    pub fn id(&self) -> String {
+        format!("{}{:02}", self.constellation.letter(), self.prn)
+    }
+}
+
+/// Satellite sky view snapshot.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Sky {
+    pub satellites: Vec<Satellite>,
+    pub in_view: usize,
+    pub used: usize,
     pub hdop: Option<f64>,
     pub vdop: Option<f64>,
     pub pdop: Option<f64>,
-    pub time: Option<NaiveTime>,
-    pub date: Option<NaiveDate>,
 }
 
-/// Complete GPS state
-#[derive(Debug, Clone, Default)]
-pub struct GpsData {
-    pub position_packet: Option<String>,
-    pub navigation: NavigationData,
-    pub fix: FixData,
-    pub satellites: HashMap<u32, SatelliteInfo>,
+/// Racing / vehicle dynamics derived from consecutive fixes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Telemetry {
+    /// m/s² (+accelerating / −braking)
+    pub longitudinal_accel_mps2: Option<f64>,
+    pub longitudinal_g: Option<f64>,
+    /// m/s² centripetal (v × ω)
+    pub lateral_accel_mps2: Option<f64>,
+    pub lateral_g: Option<f64>,
+    pub combined_g: Option<f64>,
+    /// deg/s yaw rate (ROT preferred, course difference fallback)
+    pub yaw_rate_dps: Option<f64>,
+    /// Session odometer, metres
+    pub distance_m: f64,
+    /// Session maximum speed, m/s
+    pub max_speed_mps: f64,
+    pub braking: bool,
+}
+
+/// One coherent navigation epoch.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Fix {
+    /// Monotonic counter of emitted fixes in this process.
+    pub sequence: u64,
+    /// Receiver UTC time (date + time); `None` until a date has been seen.
+    pub time: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    pub utc_time: Option<NaiveTime>,
+    #[serde(skip)]
+    pub utc_date: Option<NaiveDate>,
+    /// Host wall-clock time when the epoch was completed (Unix ms).
+    pub received_ms: i64,
+    /// True when the receiver reports a usable, measured position.
+    pub valid: bool,
+    pub mode: FixMode,
+    pub quality: FixQuality,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    /// Altitude above mean sea level, metres.
+    pub altitude_m: Option<f64>,
+    /// Geoid separation (ellipsoid − MSL), metres.
+    pub geoid_separation_m: Option<f64>,
+    pub speed_mps: Option<f64>,
+    /// Course over ground, degrees true.
+    pub course_deg: Option<f64>,
+    /// True heading from a heading sensor (HDT/THS), degrees.
+    pub heading_deg: Option<f64>,
+    pub magnetic_variation_deg: Option<f64>,
+    /// Rate of turn (ROT), deg/s.
+    pub rate_of_turn_dps: Option<f64>,
+    pub satellites_used: Option<u32>,
     pub satellites_in_view: Option<u32>,
-    pub messages: Vec<String>,
-    pub raw_nmea_buffer: Vec<String>,
-    pub last_update: Option<std::time::Instant>,
+    pub hdop: Option<f64>,
+    pub vdop: Option<f64>,
+    pub pdop: Option<f64>,
+    /// Horizontal 1-σ accuracy, metres. See `accuracy_source`.
+    pub accuracy_m: Option<f64>,
+    pub accuracy_source: Option<AccuracySource>,
+    /// GST per-axis 1-σ errors, metres.
+    pub error_lat_m: Option<f64>,
+    pub error_lon_m: Option<f64>,
+    pub error_alt_m: Option<f64>,
+    pub dgps_age_s: Option<f64>,
+    pub dgps_station: Option<u32>,
+    /// True when static hold replaced a stationary position with the held mean.
+    pub position_held: bool,
+    /// MGRS reference, 10 digits (1 m), e.g. `35V LC 31524 16761`.
+    pub mgrs: Option<String>,
+    /// MGRS reference, 8 digits (10 m), e.g. `35V LC 3152 1676`.
+    pub mgrs_8: Option<String>,
+    pub telemetry: Option<Telemetry>,
 }
 
-impl GpsData {
-    pub fn new() -> Self {
-        Self::default()
+impl Fix {
+    pub fn speed_kph(&self) -> Option<f64> {
+        self.speed_mps.map(|v| v * MPS_TO_KPH)
     }
 
-    /// Add a text message to the message log
-    pub fn add_message(&mut self, msg: String) {
-        self.messages.push(msg);
-        // Keep last 100 messages
-        if self.messages.len() > 100 {
-            self.messages.remove(0);
-        }
-    }
-
-    pub fn add_raw_nmea(&mut self, sentence: String) {
-        self.raw_nmea_buffer.push(sentence);
-        // Keep last 500 raw NMEA sentences
-        if self.raw_nmea_buffer.len() > 500 {
-            self.raw_nmea_buffer.remove(0);
-        }
-    }
-
-    /// Upsert a satellite, always refreshing last_seen to now.
-    pub fn update_satellite(&mut self, mut satellite: SatelliteInfo) {
-        satellite.last_seen = std::time::Instant::now();
-        self.satellites.insert(satellite.prn, satellite);
-        self.last_update = Some(std::time::Instant::now());
-    }
-
-    /// Get satellites grouped by GNSS system (sorted by system)
-    pub fn satellites_by_system(&self) -> BTreeMap<GnssSystem, Vec<&SatelliteInfo>> {
-        let mut result: BTreeMap<GnssSystem, Vec<&SatelliteInfo>> = BTreeMap::new();
-        for sat in self.satellites.values() {
-            result.entry(sat.system).or_default().push(sat);
-        }
-        // Sort satellites within each system by PRN
-        for sats in result.values_mut() {
-            sats.sort_by_key(|s| s.prn);
-        }
-        result
-    }
-
-    /// Get satellites with valid signal strength
-    #[allow(dead_code)]
-    pub fn satellites_with_signal(&self) -> Vec<&SatelliteInfo> {
-        self.satellites
-            .values()
-            .filter(|sat| sat.snr.is_some())
-            .collect()
-    }
-}
-
-/// MQTT connection status
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MqttStatus {
-    Disconnected,
-    Connecting,
-    Connected,
-    Error,
-}
-
-/// Application state shared between tasks
-#[derive(Debug, Clone)]
-pub struct AppState {
-    pub gps_data: GpsData,
-    pub mqtt_status: MqttStatus,
-    pub serial_connected: bool,
-    /// Whether MQTT publishing is enabled
-    pub mqtt_enabled: bool,
-    /// Human-readable GPS connection string (e.g. "/dev/ttyUSB0 @ 9600 baud")
-    pub connection_address: String,
-    /// Human-readable MQTT broker address (e.g. "localhost:1883")
-    pub mqtt_address: String,
-    /// Shared atomic counter — incremented by the MQTT task on each publish.
-    /// Read by the TUI without taking a lock.
-    pub messages_published: std::sync::Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            gps_data: GpsData::new(),
-            mqtt_status: MqttStatus::Disconnected,
-            serial_connected: false,
-            mqtt_enabled: true,
-            connection_address: String::new(),
-            mqtt_address: String::new(),
-            messages_published: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        }
-    }
-}
-
-/// Telemetry metrics calculated from GPS data
-#[derive(Debug, Clone, Default)]
-pub struct TelemetryMetrics {
-    pub longitudinal_accel: Option<f64>, // m/s² (+accel / -braking)
-    pub longitudinal_g: Option<f64>,     // longitudinal_accel / 9.81
-    pub lateral_accel: Option<f64>,      // m/s² (centripetal, via v×ω)
-    pub lateral_g: Option<f64>,          // lateral_accel / 9.81
-    pub combined_g: Option<f64>,         // √(long_g² + lat_g²)
-    pub heading_rate: Option<f64>,       // degrees/second (yaw rate)
-    pub distance_traveled: f64,          // odometer, metres
-    pub max_speed_kph: Option<f64>,      // session maximum
-    pub is_braking: bool,                // long_accel < -0.5 m/s²
-}
-
-/// Lap timing data
-#[derive(Debug, Clone)]
-pub struct LapData {
-    pub lap_number: u32,
-    pub lap_time_ms: Option<u64>, // Current/last lap time in milliseconds
-    pub best_lap_ms: Option<u64>, // Best lap time in milliseconds
-    pub current_lap_start_ms: Option<u64>, // Timestamp when current lap started
-    pub sector_times_ms: Vec<Option<u64>>, // Sector times in milliseconds
-}
-
-impl Default for LapData {
-    fn default() -> Self {
-        Self {
-            lap_number: 0,
-            lap_time_ms: None,
-            best_lap_ms: None,
-            current_lap_start_ms: None,
-            sector_times_ms: Vec::new(),
-        }
-    }
-}
-
-/// Track configuration for lap detection
-#[derive(Debug, Clone)]
-pub struct TrackConfig {
-    pub mode: TrackConfigMode,
-    pub start_finish: Option<TrackPoint>,
-    pub sectors: Vec<TrackPoint>,
-    pub learned_track: Vec<TrackPoint>, // Points recorded during learn mode
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrackConfigMode {
-    Manual,   // Manually configured start/finish
-    Learn,    // Learning mode - recording track
-    Gpx,      // Loaded from GPX file
-    Disabled, // Lap timing disabled
-}
-
-/// A point on the track with geofence radius
-#[derive(Debug, Clone)]
-pub struct TrackPoint {
-    pub latitude: f64,
-    pub longitude: f64,
-    pub radius_meters: f64, // Geofence radius
-    #[allow(dead_code)]
-    pub name: String, // e.g., "Start/Finish", "Sector 1", etc.
-}
-
-impl Default for TrackConfig {
-    fn default() -> Self {
-        Self {
-            mode: TrackConfigMode::Disabled,
-            start_finish: None,
-            sectors: Vec::new(),
-            learned_track: Vec::new(),
+    /// Valid position as `(lat, lon)`.
+    pub fn position(&self) -> Option<(f64, f64)> {
+        match (self.valid, self.latitude, self.longitude) {
+            (true, Some(lat), Some(lon)) => Some((lat, lon)),
+            _ => None,
         }
     }
 }
@@ -272,146 +333,30 @@ impl Default for TrackConfig {
 mod tests {
     use super::*;
 
-    // --- GpsData ---
+    #[test]
+    fn classify_constellations() {
+        assert_eq!(Constellation::classify("GP", 7), Constellation::Gps);
+        assert_eq!(Constellation::classify("GN", 70), Constellation::Glonass);
+        assert_eq!(Constellation::classify("GP", 46), Constellation::Sbas);
+        assert_eq!(Constellation::classify("GA", 7), Constellation::Galileo);
+        assert_eq!(Constellation::classify("GB", 7), Constellation::Beidou);
+        assert_eq!(Constellation::classify("GQ", 2), Constellation::Qzss);
+        assert_eq!(Constellation::classify("GN", 999), Constellation::Unknown);
+    }
 
     #[test]
-    fn test_gps_data_message_capped_at_100() {
-        let mut gps = GpsData::new();
-        for i in 0..110 {
-            gps.add_message(format!("msg {}", i));
+    fn quality_codes_match_gga() {
+        for (field, code) in [("0", 0), ("1", 1), ("4", 4), ("8", 8), ("x", 0)] {
+            assert_eq!(FixQuality::from_gga(field).code(), code);
         }
-        assert_eq!(gps.messages.len(), 100);
+        assert!(FixQuality::Rtk.is_measured());
+        assert!(!FixQuality::Estimated.is_measured());
     }
 
     #[test]
-    fn test_gps_data_raw_nmea_capped_at_500() {
-        let mut gps = GpsData::new();
-        for i in 0..510 {
-            gps.add_raw_nmea(format!("$GNRMC,{}", i));
-        }
-        assert_eq!(gps.raw_nmea_buffer.len(), 500);
-    }
-
-    #[test]
-    fn test_update_satellite_stores_and_sets_update_time() {
-        let mut gps = GpsData::new();
-        let sat = SatelliteInfo {
-            prn: 7,
-            elevation: Some(45),
-            azimuth: Some(180),
-            snr: Some(35),
-            system: GnssSystem::Gps,
-            ..Default::default()
-        };
-        gps.update_satellite(sat);
-        assert_eq!(gps.satellites.len(), 1);
-        assert_eq!(gps.satellites[&7].snr, Some(35));
-        assert!(gps.last_update.is_some());
-    }
-
-    #[test]
-    fn test_update_satellite_overwrites_existing_prn() {
-        let mut gps = GpsData::new();
-        gps.update_satellite(SatelliteInfo {
-            prn: 1,
-            elevation: Some(10),
-            azimuth: None,
-            snr: Some(20),
-            system: GnssSystem::Gps,
-            ..Default::default()
-        });
-        gps.update_satellite(SatelliteInfo {
-            prn: 1,
-            elevation: Some(15),
-            azimuth: None,
-            snr: Some(30),
-            system: GnssSystem::Gps,
-            ..Default::default()
-        });
-        assert_eq!(gps.satellites.len(), 1);
-        assert_eq!(gps.satellites[&1].snr, Some(30));
-    }
-
-    #[test]
-    fn test_satellites_by_system_groups_correctly() {
-        let mut gps = GpsData::new();
-        for prn in 1u32..=3 {
-            gps.update_satellite(SatelliteInfo {
-                prn,
-                elevation: None,
-                azimuth: None,
-                snr: None,
-                system: GnssSystem::Gps,
-                ..Default::default()
-            });
-        }
-        gps.update_satellite(SatelliteInfo {
-            prn: 65,
-            elevation: None,
-            azimuth: None,
-            snr: None,
-            system: GnssSystem::Glonass,
-            ..Default::default()
-        });
-        let by_system = gps.satellites_by_system();
-        assert_eq!(by_system[&GnssSystem::Gps].len(), 3);
-        assert_eq!(by_system[&GnssSystem::Glonass].len(), 1);
-    }
-
-    #[test]
-    fn test_satellites_sorted_by_prn_within_system() {
-        let mut gps = GpsData::new();
-        for prn in &[5u32, 1, 3] {
-            gps.update_satellite(SatelliteInfo {
-                prn: *prn,
-                elevation: None,
-                azimuth: None,
-                snr: None,
-                system: GnssSystem::Gps,
-                ..Default::default()
-            });
-        }
-        let by_system = gps.satellites_by_system();
-        let prns: Vec<u32> = by_system[&GnssSystem::Gps].iter().map(|s| s.prn).collect();
-        assert_eq!(prns, vec![1, 3, 5]);
-    }
-
-    // --- AppState ---
-
-    #[test]
-    fn test_app_state_default_values() {
-        let state = AppState::default();
-        assert!(!state.serial_connected);
-        assert!(state.mqtt_enabled);
-        assert_eq!(
-            state
-                .messages_published
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
-        assert_eq!(state.mqtt_status, MqttStatus::Disconnected);
-        assert!(state.connection_address.is_empty());
-        assert!(state.mqtt_address.is_empty());
-    }
-
-    // --- LapData ---
-
-    #[test]
-    fn test_lap_data_default() {
-        let lap = LapData::default();
-        assert_eq!(lap.lap_number, 0);
-        assert!(lap.lap_time_ms.is_none());
-        assert!(lap.best_lap_ms.is_none());
-        assert!(lap.sector_times_ms.is_empty());
-    }
-
-    // --- TrackConfig ---
-
-    #[test]
-    fn test_track_config_default_mode_is_disabled() {
-        let cfg = TrackConfig::default();
-        assert_eq!(cfg.mode, TrackConfigMode::Disabled);
-        assert!(cfg.start_finish.is_none());
-        assert!(cfg.sectors.is_empty());
+    fn unit_constants() {
+        assert!((25.0 * MPS_TO_KPH - 90.0).abs() < 1e-9);
+        assert!((KNOTS_TO_MPS * MPS_TO_KNOTS - 1.0).abs() < 1e-12);
+        assert!((100.0 / 3.6 * MPS_TO_MPH - 62.137).abs() < 0.001);
     }
 }

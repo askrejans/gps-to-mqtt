@@ -1,145 +1,202 @@
+#![cfg_attr(
+    test,
+    allow(clippy::field_reassign_with_default, clippy::type_complexity)
+)]
+
 mod archive;
 mod config;
+mod engine;
+mod hold;
+mod hub;
 mod logging;
-mod metrics;
+mod mgrs;
 mod models;
-mod mqtt;
-mod parser;
+mod nmea;
+mod output;
 mod position;
-mod serial;
+mod receiver;
 mod service;
-mod tcp;
+mod shared;
+mod source;
 mod telemetry;
-mod track;
 mod ui;
 
 use anyhow::Result;
-use config::load_configuration;
-use gumdrop::Options;
-use logging::TuiWriter;
-use models::{AppState, GpsData, MqttStatus};
-use parser::GpsEvent;
-use std::sync::Arc as StdArc;
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
-use tokio::sync::{RwLock, mpsc};
+use clap::Parser;
+use config::{AppConfig, ConnectionType, load_configuration};
+use shared::{Info, Shared};
+use std::collections::VecDeque;
+use std::io::IsTerminal;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{info, warn};
 
-#[derive(Debug, Options)]
-struct Opts {
-    #[options(help = "print help message")]
-    help: bool,
-
-    #[options(short = "c", help = "path to configuration file")]
+/// Universal GNSS (NMEA-0183) bridge to MQTT, HTTP, gpsd and NMEA network outputs.
+#[derive(Debug, Parser)]
+#[command(version, about)]
+struct Cli {
+    /// Path to a TOML config file (default: standard locations, then ./settings.toml)
+    #[arg(short, long, value_name = "FILE")]
     config: Option<String>,
+
+    /// Validate the configuration, print the effective settings and exit
+    #[arg(long)]
+    check_config: bool,
+
+    /// List serial ports ranked by GNSS likelihood and exit
+    #[arg(long)]
+    list_ports: bool,
+
+    /// With --list-ports: open each port and probe for NMEA at common baud rates
+    #[arg(long, requires = "list_ports")]
+    probe: bool,
+
+    /// Replay an NMEA log instead of reading a device (implies connection_type = file)
+    #[arg(long, value_name = "FILE")]
+    replay: Option<String>,
+
+    /// Never start the TUI, even on a terminal
+    #[arg(long)]
+    headless: bool,
+
+    /// Query the local HTTP /health endpoint and exit 0 (healthy) or 1 (container probes)
+    #[arg(long)]
+    healthcheck: bool,
+}
+
+/// `--healthcheck`: minimal HTTP/1.0 GET so container images need no curl.
+fn healthcheck(config: &AppConfig) -> Result<bool> {
+    use std::io::{Read, Write};
+    anyhow::ensure!(
+        config.http_enabled,
+        "http_enabled is false; nothing to probe"
+    );
+    let host = match config.http_bind.as_str() {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        h => h,
+    };
+    let addr: std::net::SocketAddr = format!("{host}:{}", config.http_port).parse()?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))?;
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.write_all(b"GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+    let mut response = String::new();
+    stream.take(4096).read_to_string(&mut response)?;
+    let ok = response.starts_with("HTTP/1.0 200") || response.starts_with("HTTP/1.1 200");
+    println!("{}", response.lines().last().unwrap_or_default());
+    Ok(ok)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let opts = Opts::parse_args_default_or_exit();
+    let cli = Cli::parse();
 
-    let config = load_configuration(opts.config.as_deref())?;
+    if cli.list_ports {
+        source::serial::list_ports(cli.probe);
+        return Ok(());
+    }
 
-    let is_tty = atty::is(atty::Stream::Stdout);
+    let mut config = load_configuration(cli.config.as_deref())?;
+    if let Some(path) = cli.replay {
+        config.connection_type = ConnectionType::File;
+        config.replay_file = Some(path);
+        config.validate()?;
+    }
+
+    if cli.healthcheck {
+        let healthy = healthcheck(&config).unwrap_or_else(|e| {
+            eprintln!("healthcheck failed: {e:#}");
+            false
+        });
+        std::process::exit(if healthy { 0 } else { 1 });
+    }
+
+    if cli.check_config {
+        println!("{}", serde_json::to_string_pretty(&config.redacted())?);
+        println!(
+            "\nConfiguration OK ({})",
+            config
+                .config_path
+                .as_deref()
+                .unwrap_or("defaults + environment")
+        );
+        return Ok(());
+    }
+
+    let tui = !cli.headless && std::io::stdout().is_terminal();
+    let log_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(
+        config.max_log_buffer_size,
+    )));
+    if tui {
+        logging::init_tui(
+            &config,
+            logging::TuiWriter::new(log_buffer.clone(), config.max_log_buffer_size),
+        );
+    } else {
+        logging::init_service(&config);
+    }
+    info!("gps-to-mqtt v{} starting", env!("CARGO_PKG_VERSION"));
+    match &config.config_path {
+        Some(p) => info!("Configuration: {p}"),
+        None => warn!("No configuration file found; using defaults and environment"),
+    }
+
+    let outputs = output::describe(&config);
+    let shared = Shared::new(
+        Info {
+            version: env!("CARGO_PKG_VERSION"),
+            source: config.connection_display(),
+            receiver: match config.effective_update_rate() {
+                Some(hz) => format!("{:?} @ {hz} Hz", config.effective_receiver()).to_lowercase(),
+                None => format!("{:?}", config.effective_receiver()).to_lowercase(),
+            },
+            mqtt: config.mqtt_enabled.then(|| config.mqtt_address()),
+            outputs: outputs.clone(),
+        },
+        config.mqtt_enabled,
+    );
+    info!(
+        "Source: {} · receiver: {}",
+        shared.info.source, shared.info.receiver
+    );
+    if outputs.is_empty() {
+        warn!("No outputs enabled — data is only shown locally");
+    }
+    for o in &outputs {
+        info!("Output: {o}");
+    }
 
     let cancel = CancellationToken::new();
+    let mut tasks = JoinSet::new();
 
-    // Initialise logging — TUI mode captures logs into a ring buffer shown in the UI;
-    // service / daemon mode writes structured logs to stdout.
-    let log_buffer: Option<Arc<Mutex<VecDeque<String>>>> = if is_tty {
-        let buf = Arc::new(Mutex::new(VecDeque::<String>::with_capacity(
-            config.max_log_buffer_size,
-        )));
-        logging::init_logging_tui(&config, TuiWriter::new(Arc::clone(&buf)));
-        Some(buf)
-    } else {
-        display_welcome();
-        logging::init_logging_service(&config);
-        None
-    };
+    let archive = config
+        .telemetry_log
+        .clone()
+        .map(|path| archive::spawn(path, shared.clone()));
 
-    info!("Starting GPS-to-MQTT v{}", env!("CARGO_PKG_VERSION"));
-
-    // Shared application state
-    let app_state = Arc::new(RwLock::new(AppState {
-        mqtt_enabled: config.mqtt_enabled,
-        connection_address: config.connection_display(),
-        mqtt_address: if config.mqtt_enabled {
-            config.mqtt_address()
-        } else {
-            String::new()
-        },
-        ..AppState::default()
-    }));
-
-    // Channels
-    let (gps_event_tx, gps_event_rx) = mpsc::channel::<GpsEvent>(100);
-    let (gps_data_tx, gps_data_rx) = mpsc::channel::<GpsData>(10);
-    let (mqtt_status_tx, mqtt_status_rx) = mpsc::channel::<MqttStatus>(10);
-
-    // GPS event → state + forward to MQTT (None when MQTT disabled)
+    let (source_tx, source_rx) = mpsc::channel(256);
     {
-        let state = Arc::clone(&app_state);
-        let telemetry_log = config.telemetry_log.clone();
-        let data_tx = if config.mqtt_enabled {
-            Some(gps_data_tx)
-        } else {
-            None
+        let (s, k) = (shared.clone(), cancel.clone());
+        let opts = hub::HubOptions {
+            require_checksum: config.nmea_require_checksum,
+            telemetry_window: config
+                .telemetry_enabled
+                .then_some(config.telemetry_smoothing_window),
+            satellite_timeout: Duration::from_secs(config.satellite_timeout_s),
+            static_hold: config.static_hold.then(|| hold::HoldConfig {
+                speed_mps: config.static_hold_speed_kph / 3.6,
+                radius_m: config.static_hold_radius_m,
+            }),
+            archive,
         };
-        tokio::spawn(async move {
-            process_gps_events(gps_event_rx, state, data_tx, telemetry_log).await;
-        });
+        tasks.spawn(hub::run(source_rx, s, opts, k));
     }
+    output::spawn_all(&config, &shared, &cancel, &mut tasks);
+    source::spawn(&config, source_tx, cancel.clone());
 
-    // MQTT status → state
-    {
-        let state = Arc::clone(&app_state);
-        tokio::spawn(async move {
-            update_mqtt_status(mqtt_status_rx, state).await;
-        });
-    }
-
-    // Start GPS source (serial port or TCP bridge)
-    if config.connection_type == "tcp" {
-        tcp::spawn_tcp_task(config.clone(), gps_event_tx, cancel.clone()).await?;
-        info!("TCP bridge task started");
-    } else {
-        serial::spawn_serial_task(config.clone(), gps_event_tx, cancel.clone()).await?;
-        info!("Serial port task started");
-    }
-
-    // Start MQTT client (optional)
-    if config.mqtt_enabled {
-        let msg_counter = StdArc::clone(&app_state.read().await.messages_published);
-        mqtt::spawn_mqtt_task(config.clone(), gps_data_rx, mqtt_status_tx, msg_counter).await?;
-        info!("MQTT task started");
-    } else {
-        info!("MQTT disabled — running in display-only mode");
-        drop(gps_data_rx);
-        drop(mqtt_status_tx);
-    }
-
-    // Start Prometheus metrics server (optional)
-    if config.prometheus_enabled {
-        let bind = config.prometheus_bind.clone();
-        let port = config.prometheus_port;
-        let state = Arc::clone(&app_state);
-        let c = cancel.clone();
-        tokio::spawn(async move {
-            if let Err(e) = metrics::spawn_metrics_server(&bind, port, state, c).await {
-                error!("Metrics server error: {}", e);
-            }
-        });
-        info!(
-            "Prometheus metrics server started on {}:{}",
-            config.prometheus_bind, config.prometheus_port
-        );
-    }
-
-    // Spawn signal listener — cancels the token on SIGTERM / Ctrl+C
     {
         let c = cancel.clone();
         tokio::spawn(async move {
@@ -148,152 +205,51 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Wait: TUI blocks until quit; service mode waits for the cancel token
-    if is_tty {
-        let buf = log_buffer.expect("log_buffer is Some in TUI mode");
-        if let Err(e) = ui::run_tui(Arc::clone(&app_state), buf, cancel.clone()).await {
-            error!("TUI error: {}", e);
+    if tui {
+        let replay = config.connection_type == ConnectionType::File;
+        if let Err(e) = ui::run(
+            shared.clone(),
+            log_buffer,
+            cancel.clone(),
+            config.tui_refresh_rate_ms,
+            replay,
+        )
+        .await
+        {
+            eprintln!("TUI error: {e:#}");
         }
         cancel.cancel();
     } else {
         cancel.cancelled().await;
     }
 
-    info!("Application shutdown complete");
+    info!("Shutting down");
+    // Let outputs publish their offline status; never hang on exit.
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+    info!("Shutdown complete");
     Ok(())
 }
 
-/// Process GPS events and update application state
-async fn process_gps_events(
-    mut event_rx: mpsc::Receiver<GpsEvent>,
-    state: Arc<RwLock<AppState>>,
-    data_tx: Option<mpsc::Sender<GpsData>>,
-    telemetry_log: Option<String>,
-) {
-    let mut position = position::PositionEncoder::new();
-    while let Some(event) = event_rx.recv().await {
-        let mut state_guard = state.write().await;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        state_guard.gps_data.position_packet = None;
-        match event {
-            GpsEvent::SatelliteUpdate(sat) => {
-                state_guard.gps_data.update_satellite(sat);
-                state_guard.serial_connected = true;
-            }
-            GpsEvent::NavigationUpdate(nav) => {
-                if nav.latitude.is_some() {
-                    state_guard.gps_data.navigation.latitude = nav.latitude;
-                }
-                if nav.longitude.is_some() {
-                    state_guard.gps_data.navigation.longitude = nav.longitude;
-                }
-                if nav.altitude.is_some() {
-                    state_guard.gps_data.navigation.altitude = nav.altitude;
-                }
-                if nav.speed_knots.is_some() {
-                    state_guard.gps_data.navigation.speed_knots = nav.speed_knots;
-                }
-                if nav.speed_kph.is_some() {
-                    state_guard.gps_data.navigation.speed_kph = nav.speed_kph;
-                }
-                if nav.course.is_some() {
-                    state_guard.gps_data.navigation.course = nav.course;
-                }
-                state_guard.gps_data.last_update = Some(std::time::Instant::now());
-                state_guard.serial_connected = true;
-            }
-            GpsEvent::FixUpdate(fix) => {
-                if fix.fix_type.is_some() {
-                    state_guard.gps_data.fix.fix_type = fix.fix_type;
-                }
-                if fix.fix_quality.is_some() {
-                    state_guard.gps_data.fix.fix_quality = fix.fix_quality;
-                }
-                if fix.satellites_used.is_some() {
-                    state_guard.gps_data.fix.satellites_used = fix.satellites_used;
-                }
-                if fix.hdop.is_some() {
-                    state_guard.gps_data.fix.hdop = fix.hdop;
-                }
-                if fix.vdop.is_some() {
-                    state_guard.gps_data.fix.vdop = fix.vdop;
-                }
-                if fix.pdop.is_some() {
-                    state_guard.gps_data.fix.pdop = fix.pdop;
-                }
-                if fix.time.is_some() {
-                    state_guard.gps_data.fix.time = fix.time;
-                }
-                if fix.date.is_some() {
-                    state_guard.gps_data.fix.date = fix.date;
-                }
-                state_guard.gps_data.last_update = Some(std::time::Instant::now());
-                state_guard.serial_connected = true;
-            }
-            GpsEvent::Message(msg) => {
-                state_guard.gps_data.add_message(msg);
-                state_guard.serial_connected = true;
-            }
-            GpsEvent::RawNmea(sentence) => {
-                state_guard.gps_data.position_packet = position.sentence(&sentence);
-                state_guard.gps_data.add_raw_nmea(sentence);
-                state_guard.serial_connected = true;
-            }
-            GpsEvent::AccuracyUpdate {
-                std_lat,
-                std_lon,
-                std_alt: _,
-            } => {
-                let position_accuracy = (std_lat * std_lat + std_lon * std_lon).sqrt();
-                state_guard.gps_data.navigation.position_accuracy = Some(position_accuracy);
-                state_guard.gps_data.last_update = Some(std::time::Instant::now());
-                state_guard.serial_connected = true;
-            }
-            GpsEvent::RateOfTurn(rate) => {
-                state_guard.gps_data.navigation.heading_rate = Some(rate / 60.0); // deg/min → deg/s
-                state_guard.gps_data.last_update = Some(std::time::Instant::now());
-                state_guard.serial_connected = true;
-            }
-            GpsEvent::TrueHeading(heading) => {
-                state_guard.gps_data.navigation.true_heading = Some(heading);
-                state_guard.gps_data.last_update = Some(std::time::Instant::now());
-                state_guard.serial_connected = true;
-            }
-        }
-
-        state_guard.gps_data.satellites_in_view =
-            Some(state_guard.gps_data.satellites.len() as u32);
-
-        if let Some(ref packet) = state_guard.gps_data.position_packet {
-            archive::record(telemetry_log.as_deref(), packet).await;
-        }
-        if let Some(ref tx) = data_tx {
-            if let Err(e) = tx.try_send(state_guard.gps_data.clone()) {
-                tracing::debug!(
-                    "MQTT live queue unavailable; local capture continues: {}",
-                    e
-                );
-            }
-        }
+    #[test]
+    fn cli_parses() {
+        Cli::command_check();
+        let cli = Cli::parse_from(["gps-to-mqtt", "-c", "x.toml", "--headless"]);
+        assert_eq!(cli.config.as_deref(), Some("x.toml"));
+        assert!(cli.headless);
+        assert!(Cli::try_parse_from(["gps-to-mqtt", "--probe"]).is_err());
     }
 
-    info!("GPS event processing task ended");
-}
-
-/// Update MQTT connection status
-async fn update_mqtt_status(
-    mut status_rx: mpsc::Receiver<MqttStatus>,
-    state: Arc<RwLock<AppState>>,
-) {
-    while let Some(status) = status_rx.recv().await {
-        let mut state_guard = state.write().await;
-        state_guard.mqtt_status = status;
-        info!("MQTT status: {:?}", status);
+    impl Cli {
+        fn command_check() {
+            use clap::CommandFactory;
+            Cli::command().debug_assert();
+        }
     }
-}
-
-fn display_welcome() {
-    println!("\n╔═══════════════════════════════════════════╗");
-    println!("║        GPS to MQTT Bridge                 ║");
-    println!("╚═══════════════════════════════════════════╝\n");
 }

@@ -1,97 +1,157 @@
-# GPS to MQTT — settings.toml
+# gps-to-mqtt — settings.toml
 #
-# All values shown here are the built-in defaults.
-# Only override what you need to change.
+# Every key is optional; the values shown are the built-in defaults.
+# With no file at all, gps-to-mqtt auto-detects a USB/serial receiver and
+# publishes to an MQTT broker on localhost.
 #
-# Environment variables (highest priority):
-#   GPS_TO_MQTT_CONNECTION_TYPE, GPS_TO_MQTT_PORT_NAME, GPS_TO_MQTT_BAUD_RATE,
-#   GPS_TO_MQTT_TCP_HOST, GPS_TO_MQTT_TCP_PORT, GPS_TO_MQTT_MQTT_HOST, …
+# Every key can be overridden by an environment variable: GPS_TO_MQTT_<KEY>,
+# e.g. GPS_TO_MQTT_MQTT_HOST=broker.lan, GPS_TO_MQTT_MQTT_FORMATS=legacy,json
+# A .env file in the working directory is loaded automatically.
+#
+# Check a config without starting:   gps-to-mqtt --check-config -c settings.toml
+# Find your receiver:                gps-to-mqtt --list-ports --probe
 
-# ---------------------------------------------------------------------------
-# Connection type
-# ---------------------------------------------------------------------------
-# Choose how to receive GPS data:
-#   serial  — directly attached USB/UART GPS device (default)
-#   tcp     — network bridge, e.g. https://github.com/askrejans/io-to-net
+# ═════════════════════════════════════════════════════════════════════════
+# Source
+# ═════════════════════════════════════════════════════════════════════════
+# serial | tcp | udp | gpsd | file
 connection_type = "serial"
 
-# ---------------------------------------------------------------------------
-# Serial port  (used when connection_type = "serial")
-# ---------------------------------------------------------------------------
-port_name = "/dev/ttyACM0"
-baud_rate  = 9600
-set_gps_to_10hz = false
+# ── serial ───────────────────────────────────────────────────────────────
+# "auto" ranks USB serial ports (u-blox, MediaTek, Quectel, Garmin, PL2303,
+# CP210x, CH34x, FTDI …) and keeps the first one that sends valid NMEA.
+port_name = "auto"          # or "/dev/ttyACM0", "/dev/serial0", "COM3"
+baud_rate = 0               # 0 = auto-detect; or 4800 … 921600
 
-# ---------------------------------------------------------------------------
-# TCP bridge   (used when connection_type = "tcp")
-# ---------------------------------------------------------------------------
-# Point these at an io-to-net instance forwarding the GPS serial port.
-# Example io-to-net bridge config (gps bridge listening on port 9001):
-#
-#   [[bridges]]
-#   name = "gps"
-#   frame_mode = "line"
-#
-#   [bridges.source]
-#   type  = "serial"
-#   port  = "/dev/ttyUSB0"
-#   baud  = 9600
-#
-#   [bridges.transport]
-#   type   = "tcp"
-#   listen = "[::]:9001"
-#
+# ── tcp (serial-to-network bridge: io-to-net, ser2net, Wi-Fi GNSS modules) ──
 # tcp_host = "192.168.1.10"
 # tcp_port = 9001
 
-# ---------------------------------------------------------------------------
+# ── gpsd (read the raw NMEA stream from an existing gpsd) ─────────────────
+# tcp_host defaults to 127.0.0.1, tcp_port to 2947
+
+# ── udp (NMEA datagrams from marine multiplexers, phones, OpenCPN) ────────
+udp_bind = "0.0.0.0:10110"
+
+# ── file (replay a recorded NMEA log; also: gps-to-mqtt --replay log.nmea) ─
+# replay_file = "/path/to/log.nmea"
+replay_speed = 1.0          # 0 = as fast as possible
+replay_loop  = false
+
+# Reject sentences without a *hh checksum (a present checksum is always verified)
+nmea_require_checksum = true
+
+# ═════════════════════════════════════════════════════════════════════════
+# Receiver
+# ═════════════════════════════════════════════════════════════════════════
+# generic  — any NMEA-0183 receiver; nothing is ever written to the device
+# ublox    — u-blox 6/7/M8/M9/M10/F9 (UBX)
+# mediatek — MT33xx: GlobalTop, Adafruit Ultimate GPS, Quectel L76/L80 (PMTK)
+# quectel  — Quectel LC29H/LC79H/LG69T (PAIR)
+receiver = "generic"
+
+# Navigation rate to configure, 1–25 Hz (unset = leave the receiver alone).
+# For ublox/mediatek above 1 Hz the sentence set is trimmed to RMC+GGA every
+# epoch with GSA/GSV once per second, and a serial link is raised to 115200
+# baud when needed (verified, with automatic fallback). Settings go to the
+# receiver's RAM only; a power cycle restores its stored configuration.
+# update_rate_hz = 10
+
+# Extra commands sent after connecting (before the rate plan):
+#   "PMTK314,…"        → $ and checksum are added
+#   "$PMTK220,100*2F"  → sent verbatim
+#   "hex:B5 62 …"      → raw bytes (UBX, binary protocols)
+# init_commands = ["PUBX,40,GLL,0,0,0,0"]
+
+# Legacy 0.6 switch, equivalent to receiver = "ublox" + update_rate_hz = 10
+# set_gps_to_10hz = false
+
+# ═════════════════════════════════════════════════════════════════════════
 # MQTT
-# ---------------------------------------------------------------------------
-mqtt_enabled = true                 # set to false for display-only / no MQTT
-mqtt_host    = "localhost"
-mqtt_port    = 1883
-# mqtt_client_id = "gps-to-mqtt"   # auto-generated when absent
+# ═════════════════════════════════════════════════════════════════════════
+mqtt_enabled    = true
+mqtt_host       = "localhost"
+mqtt_port       = 1883
 mqtt_base_topic = "/GOLF86/GPS"
-mqtt_reconnect_max_attempts = 0     # 0 = infinite retries
+# mqtt_client_id = "gps-to-mqtt-car1"   # default: unique per process
 
-# Optional authentication
-# mqtt_username = ""
-# mqtt_password = ""
-# mqtt_use_tls  = false
+# What to publish (any combination):
+#   legacy        <base>/LAT, /LNG, /SPD … one retained value per topic (G86 dashboard)
+#   json          <base>/fix and <base>/sky JSON documents
+#   g86           <base>/position — G86 app external-GPS packet (never retained)
+#   homeassistant Home Assistant MQTT discovery (device_tracker + sensors)
+#   owntracks     OwnTracks location messages (Home Assistant, Traccar, Recorder)
+mqtt_formats = ["legacy", "json", "g86"]
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-log_level = "info"   # trace | debug | info | warn | error
-log_json  = false     # true = JSON structured logs (useful for log aggregators)
+mqtt_qos         = 0        # 0 or 1 for data topics
+mqtt_retain      = true     # retain legacy/json state topics
+mqtt_max_rate_hz = 0        # throttle legacy/json/owntracks (0 = every fix; g86 never throttled)
+mqtt_keep_alive_s = 30
+mqtt_reconnect_max_attempts = 0   # 0 = retry forever
 
-# ---------------------------------------------------------------------------
-# TUI
-# ---------------------------------------------------------------------------
-tui_refresh_rate_ms  = 100
-max_log_buffer_size  = 1000
+mqtt_homeassistant_prefix = "homeassistant"
+# mqtt_owntracks_topic = "owntracks/car/gps"   # default owntracks/gps-to-mqtt/<base topic>
+mqtt_owntracks_tid = "GP"
 
-# ---------------------------------------------------------------------------
-# Telemetry
-# ---------------------------------------------------------------------------
-telemetry_enabled          = true
-telemetry_smoothing_window = 3
+# Authentication
+# mqtt_username      = "gps"
+# mqtt_password      = ""
+# mqtt_password_file = "/run/secrets/mqtt_password"   # preferred over mqtt_password
 
-# ---------------------------------------------------------------------------
-# Prometheus metrics
-# ---------------------------------------------------------------------------
-prometheus_enabled = false        # set to true to expose /metrics and /health
-prometheus_port    = 9090
-prometheus_bind    = "0.0.0.0"   # use "127.0.0.1" to restrict to localhost
+# TLS (port 8883). System roots are used unless mqtt_ca_file is set.
+# mqtt_use_tls          = true
+# mqtt_ca_file          = "/etc/gps-to-mqtt/ca.pem"
+# mqtt_client_cert_file = "/etc/gps-to-mqtt/client.pem"   # mutual TLS
+# mqtt_client_key_file  = "/etc/gps-to-mqtt/client.key"
 
-# ---------------------------------------------------------------------------
-# Track / lap timing
-# ---------------------------------------------------------------------------
-track_mode = "disabled"   # disabled | manual | learn | gpx
-# track_start_lat      = 40.7128
-# track_start_lon      = -74.0060
-track_geofence_radius = 15.0
-# track_gpx_file = "/path/to/track.gpx"
+# ═════════════════════════════════════════════════════════════════════════
+# HTTP API — /health, /metrics (Prometheus), /api/v1/{status,fix,sky,geojson,nmea,stream}
+# ═════════════════════════════════════════════════════════════════════════
+http_enabled = false
+http_bind    = "127.0.0.1"  # use "0.0.0.0" for network access (set http_token!)
+http_port    = 9090
+# http_token = "change-me"  # Bearer token for /api/* (health/metrics stay open)
+# http_cors_origin = "https://dashboard.example"
+http_ui = true              # built-in web dashboard at /
 
-# Optional local canonical NDJSON archive; rotate/export before the 512 MiB cap.
+# Map behind the dashboard track. Tile servers see which area is viewed.
+# "" = no map and no third-party requests (offline); the local plot is used.
+http_map_tiles = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+http_map_dark  = true       # colour-invert for a dark map; false for natively dark tiles
+http_map_attribution = "© OpenStreetMap contributors"
+
+# ═════════════════════════════════════════════════════════════════════════
+# Network re-broadcast
+# ═════════════════════════════════════════════════════════════════════════
+# NMEA-0183 over TCP (OpenCPN, Signal K, qtVlm, chart plotters): standard port 10110
+# nmea_tcp_listen = "0.0.0.0:10110"
+# NMEA-0183 over UDP: broadcast or unicast
+# nmea_udp_target = "255.255.255.255:10110"
+# gpsd-compatible JSON server (cgps, gpsmon, Navit, FoxtrotGPS, libgps clients)
+# gpsd_listen = "127.0.0.1:2947"
+max_clients = 16
+
+# ═════════════════════════════════════════════════════════════════════════
+# Processing
+# ═════════════════════════════════════════════════════════════════════════
+telemetry_enabled          = true   # g-forces, yaw rate, distance, braking
+telemetry_smoothing_window = 3      # fixes in the derivative window
+satellite_timeout_s        = 10     # drop satellites not reported for this long
+
+# Static hold: pin the position while stationary so idle jitter does not move
+# coordinates, MGRS, the map or MQTT values. Releases on movement or drift.
+# The G86 position packet always carries raw receiver fixes.
+static_hold           = false
+static_hold_speed_kph = 2.0
+static_hold_radius_m  = 5.0
+
+# Synced NDJSON archive of G86 position packets (absolute path; rotate by rename)
 # telemetry_log = "/var/lib/gps-to-mqtt/telemetry.ndjson"
+
+# ═════════════════════════════════════════════════════════════════════════
+# Logging / TUI
+# ═════════════════════════════════════════════════════════════════════════
+log_level = "info"          # trace | debug | info | warn | error (RUST_LOG overrides)
+log_json  = false           # JSON lines for log aggregation (service mode)
+tui_refresh_rate_ms = 100
+max_log_buffer_size = 1000

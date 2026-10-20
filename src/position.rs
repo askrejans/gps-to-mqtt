@@ -1,5 +1,5 @@
 //! Coherent live position packets for G86. RMC and GGA must describe the same fix.
-use crate::parser::{parse_coordinate, parse_date, parse_time};
+use crate::nmea::fields::{parse_coordinate, parse_date, parse_time};
 use chrono::{NaiveTime, Utc};
 use serde::Serialize;
 
@@ -63,10 +63,10 @@ impl PositionEncoder {
                     return None;
                 }
                 // Reject dead reckoning, manual/simulation and invalid modes.
-                if let Some(mode) = p.get(12) {
-                    if !["", "A", "D", "F", "R", "P"].contains(mode) {
-                        return None;
-                    }
+                if let Some(mode) = p.get(12)
+                    && !["", "A", "D", "F", "R", "P"].contains(mode)
+                {
+                    return None;
                 }
                 let time = parse_time(p[1]).ok()?;
                 let timestamp = parse_date(p[9])

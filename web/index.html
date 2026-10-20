@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#08090a">
+  <title>gps-to-mqtt</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="brand"><span class="name">gps-to-mqtt</span><span class="ver" id="version">—</span></div>
+    <div class="lamps" aria-label="Link status">
+      <span class="lamp" id="lamp-source" title="GNSS source"><i></i>Source</span>
+      <span class="lamp" id="lamp-fix" title="Fix"><i></i>Fix</span>
+      <span class="lamp" id="lamp-mqtt" title="MQTT broker"><i></i>MQTT</span>
+      <span class="lamp" id="lamp-link" title="Dashboard data stream"><i></i>Live</span>
+    </div>
+    <div class="clock"><span class="lbl">UTC</span><b id="utc">--:--:--</b></div>
+  </header>
+
+  <section class="panel readout" aria-label="Primary readout">
+    <div class="cell wide"><span class="lbl">Speed</span><span class="val big"><b id="r-speed">—</b><small id="r-speed-u">km/h</small></span><span class="sub" id="r-speed-sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Fix</span><span class="val txt" id="r-fix">NO DATA</span><span class="sub" id="r-fix-sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Satellites</span><span class="val"><b id="r-sats">—</b><small id="r-sats-view">/ —</small></span><span class="sub" id="r-sats-sub">used / in view</span></div>
+    <div class="cell"><span class="lbl">Accuracy</span><span class="val"><b id="r-acc">—</b><small>m</small></span><span class="sub" id="r-acc-sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Altitude</span><span class="val"><b id="r-alt">—</b><small id="r-alt-u">m</small></span><span class="sub">above MSL</span></div>
+    <div class="cell"><span class="lbl">Course</span><span class="val"><b id="r-crs">—</b><small>°</small></span><span class="sub" id="r-crs-sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Rate</span><span class="val"><b id="r-rate">—</b><small>Hz</small></span><span class="sub" id="r-rate-sub">&nbsp;</span></div>
+  </section>
+
+  <nav class="keys" aria-label="Mode">
+    <button class="key" data-mode="drive"><i class="led"></i>Drive</button>
+    <button class="key" data-mode="nav"><i class="led"></i>Navigation</button>
+    <button class="key" data-mode="sky"><i class="led"></i>Satellites</button>
+    <button class="key" data-mode="system"><i class="led"></i>System</button>
+    <button class="key" data-mode="config"><i class="led"></i>Configuration</button>
+    <span class="spacer"></span>
+    <button class="key small" id="k-units" title="Speed units"><i class="led on"></i><span id="k-units-t">km/h</span></button>
+    <button class="key small" id="k-dim" title="Display brightness"><i class="led on"></i><span id="k-dim-t">Bright</span></button>
+  </nav>
+
+  <main>
+    <!-- Drive -->
+    <section class="mode" id="mode-drive" hidden>
+      <div class="grid g-drive">
+        <article class="panel">
+          <h2>Acceleration <span class="note">friction circle, g</span></h2>
+          <canvas id="c-gg" class="square"></canvas>
+        </article>
+        <article class="panel">
+          <h2>Dynamics</h2>
+          <div class="meters">
+            <div class="mrow"><span class="lbl">Longitudinal</span><b id="d-long">—</b><div class="bipolar" id="m-long"></div></div>
+            <div class="mrow"><span class="lbl">Lateral</span><b id="d-lat">—</b><div class="bipolar" id="m-lat"></div></div>
+            <div class="mrow"><span class="lbl">Combined</span><b id="d-comb">—</b><div class="meter" id="m-comb"></div></div>
+            <div class="mrow"><span class="lbl">Yaw rate</span><b id="d-yaw">—</b><div class="bipolar" id="m-yaw"></div></div>
+          </div>
+          <div class="facts">
+            <div><span class="lbl">Braking</span><span class="state" id="d-brake">—</span></div>
+            <div><span class="lbl">Max speed</span><b id="d-max">—</b></div>
+            <div><span class="lbl">Distance</span><b id="d-dist">—</b></div>
+            <div><span class="lbl">Peak combined</span><b id="d-peak">—</b></div>
+          </div>
+        </article>
+        <article class="panel">
+          <h2>Heading</h2>
+          <canvas id="c-compass" class="square"></canvas>
+        </article>
+      </div>
+    </section>
+
+    <!-- Navigation -->
+    <section class="mode" id="mode-nav" hidden>
+      <div class="grid g-nav">
+        <article class="panel">
+          <h2>Position</h2>
+          <dl class="kv" id="nav-pos"></dl>
+          <div class="actions">
+            <button class="key small" id="k-copy"><i class="led"></i>Copy coordinates</button>
+            <button class="key small" id="k-copy-mgrs"><i class="led"></i>Copy MGRS</button>
+            <a class="key small" id="k-geojson" href="api/v1/geojson" target="_blank" rel="noopener"><i class="led"></i>GeoJSON</a>
+          </div>
+        </article>
+        <article class="panel">
+          <h2>Track <span class="note" id="trail-note">recent positions</span></h2>
+          <div class="mapbox" id="mapbox">
+            <canvas id="c-tiles" class="layer tiles" aria-hidden="true"></canvas>
+            <canvas id="c-trail" class="layer" aria-label="Track"></canvas>
+            <span class="attrib" id="map-attrib" hidden></span>
+          </div>
+          <div class="actions">
+            <button class="key small" id="k-view-map"><i class="led"></i>Map</button>
+            <button class="key small" id="k-view-plot"><i class="led"></i>Plot</button>
+            <button class="key small" id="k-zoom-out" title="Zoom out (Ctrl/⌘ + wheel)">−</button>
+            <button class="key small" id="k-zoom-in" title="Zoom in (Ctrl/⌘ + wheel)">+</button>
+            <button class="key small" id="k-follow"><i class="led"></i>Follow</button>
+            <button class="key small" id="k-trail-clear"><i class="led"></i>Clear track</button>
+          </div>
+        </article>
+        <article class="panel">
+          <h2>Quality</h2>
+          <dl class="kv" id="nav-quality"></dl>
+        </article>
+      </div>
+    </section>
+
+    <!-- Satellites -->
+    <section class="mode" id="mode-sky" hidden>
+      <div class="grid g-sky">
+        <article class="panel">
+          <h2>Sky view <span class="note">north up · filled = used in fix</span></h2>
+          <canvas id="c-sky" class="square"></canvas>
+          <div class="legend" id="sky-legend"></div>
+        </article>
+        <article class="panel">
+          <h2>Signal strength <span class="note">C/N₀ dB-Hz</span></h2>
+          <canvas id="c-snr" class="wide-canvas"></canvas>
+          <h2>Dilution of precision</h2>
+          <div class="meters">
+            <div class="mrow"><span class="lbl">HDOP</span><b id="s-hdop">—</b><div class="meter inv" id="m-hdop"></div></div>
+            <div class="mrow"><span class="lbl">VDOP</span><b id="s-vdop">—</b><div class="meter inv" id="m-vdop"></div></div>
+            <div class="mrow"><span class="lbl">PDOP</span><b id="s-pdop">—</b><div class="meter inv" id="m-pdop"></div></div>
+          </div>
+        </article>
+        <article class="panel span2">
+          <h2>Satellites <span class="note" id="sat-count">—</span></h2>
+          <div class="table-wrap">
+            <table class="tbl" id="sat-table">
+              <thead><tr><th>ID</th><th>System</th><th class="n">Elev.</th><th class="n">Azim.</th><th class="n">C/N₀</th><th>Signal</th><th>Used</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- System -->
+    <section class="mode" id="mode-system" hidden>
+      <div class="grid g-sys">
+        <article class="panel">
+          <h2>Links</h2>
+          <dl class="kv" id="sys-links"></dl>
+        </article>
+        <article class="panel">
+          <h2>Counters</h2>
+          <dl class="kv" id="sys-counters"></dl>
+        </article>
+        <article class="panel">
+          <h2>Receiver messages</h2>
+          <ul class="log" id="sys-messages"></ul>
+        </article>
+        <article class="panel span3">
+          <h2>NMEA monitor
+            <span class="note" id="nmea-note">last 40 sentences</span>
+          </h2>
+          <div class="actions top">
+            <button class="key small" id="k-nmea-pause"><i class="led"></i><span>Pause</span></button>
+            <input class="filter" id="nmea-filter" placeholder="Filter, e.g. GGA" spellcheck="false" autocomplete="off">
+          </div>
+          <pre class="nmea" id="sys-nmea"></pre>
+        </article>
+      </div>
+    </section>
+
+    <!-- Configuration -->
+    <section class="mode" id="mode-config" hidden>
+      <div class="grid g-cfg">
+        <article class="panel">
+          <h2>Wiring</h2>
+          <dl class="kv" id="cfg-wiring"></dl>
+          <h2>Endpoints</h2>
+          <ul class="links" id="cfg-endpoints"></ul>
+        </article>
+        <article class="panel span2">
+          <h2>Effective configuration <span class="note">read-only · secrets masked · edit settings.toml or GPS_TO_MQTT_* variables</span></h2>
+          <div class="cfg" id="cfg-groups"></div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="auth">
+    <form method="dialog" class="panel">
+      <h2>Access token required</h2>
+      <p>This bridge protects its API with <code>http_token</code>. The token is kept in this browser only.</p>
+      <input id="auth-token" type="password" autocomplete="current-password" placeholder="Bearer token" required>
+      <div class="actions"><button class="key" value="ok"><i class="led on"></i>Connect</button></div>
+    </form>
+  </dialog>
+
+  <footer class="foot"><span id="foot-source">—</span><span id="foot-uptime"></span></footer>
+</body>
+</html>

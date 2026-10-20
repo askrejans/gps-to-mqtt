@@ -1,60 +1,78 @@
 services:
 
   gps-to-mqtt:
-    # ── Image ────────────────────────────────────────────────────────────────
-    # Option A – build locally from source:
+    # Option A – build locally from source
     build: .
-    # Option B – use the pre-built image from the registry:
+    # Option B – pre-built image
     # image: ghcr.io/askrejans/gps-to-mqtt:latest
 
     restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
 
-    # ── Serial device (serial connection only) ───────────────────────────────
-    # Uncomment and adjust if connecting via USB/serial GPS dongle.
-    # Common paths: /dev/ttyACM0, /dev/ttyUSB0, /dev/ttyS0
+    # ── Serial receiver ──────────────────────────────────────────────────────
+    # Map the device (auto-detection then finds it inside the container).
+    # Stable paths under /dev/serial/by-id/ survive re-plugging.
     # devices:
-    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    #   - /dev/ttyACM0:/dev/ttyACM0
 
     environment:
-
-      # ── Connection type ─────────────────────────────────────────────────────
-      # "serial" – direct USB/serial GPS dongle (uncomment devices block above)
-      # "tcp"    – TCP bridge, e.g. io-to-net (https://github.com/askrejans/io-to-net)
+      # Source: serial | tcp | udp | gpsd | file
       GPS_TO_MQTT_CONNECTION_TYPE: serial
+      GPS_TO_MQTT_PORT_NAME: auto            # or /dev/ttyACM0
+      GPS_TO_MQTT_BAUD_RATE: "0"             # 0 = auto-detect
 
-      # ── Serial settings (used when CONNECTION_TYPE=serial) ──────────────────
-      GPS_TO_MQTT_PORT_NAME: /dev/ttyUSB0   # device path inside the container
-      GPS_TO_MQTT_BAUD_RATE: "9600"
+      # TCP bridge / gpsd source
+      # GPS_TO_MQTT_TCP_HOST: 192.168.1.10
+      # GPS_TO_MQTT_TCP_PORT: "9001"
 
-      # ── 10 Hz mode (u-blox devices only – use at your own risk) ─────────────
-      # GPS_TO_MQTT_SET_GPS_TO_10HZ: "false"
+      # Receiver profile + rate (ublox | mediatek | quectel | generic)
+      # GPS_TO_MQTT_RECEIVER: ublox
+      # GPS_TO_MQTT_UPDATE_RATE_HZ: "10"
 
-      # ── TCP settings (used when CONNECTION_TYPE=tcp) ─────────────────────────
-      # GPS_TO_MQTT_TCP_HOST: 192.168.1.10  # IP or hostname of the TCP bridge
-      # GPS_TO_MQTT_TCP_PORT: "9001"        # port exposed by the bridge
-
-      # ── MQTT broker ──────────────────────────────────────────────────────────
-      GPS_TO_MQTT_MQTT_ENABLED: "true"        # set "false" for display/log-only mode
-      GPS_TO_MQTT_MQTT_HOST: mqtt.local       # broker IP or hostname
+      # MQTT
+      GPS_TO_MQTT_MQTT_ENABLED: "true"
+      GPS_TO_MQTT_MQTT_HOST: mqtt.local
       GPS_TO_MQTT_MQTT_PORT: "1883"
-      GPS_TO_MQTT_MQTT_BASE_TOPIC: /CAR/GPS/
-      # GPS_TO_MQTT_MQTT_USERNAME: ""
-      # GPS_TO_MQTT_MQTT_PASSWORD: ""
+      GPS_TO_MQTT_MQTT_BASE_TOPIC: /CAR/GPS
+      GPS_TO_MQTT_MQTT_FORMATS: legacy,json,g86   # + homeassistant, owntracks
+      # GPS_TO_MQTT_MQTT_USERNAME: gps
+      # GPS_TO_MQTT_MQTT_PASSWORD_FILE: /run/secrets/mqtt_password
 
-      # ── Logging ──────────────────────────────────────────────────────────────
-      # trace | debug | info | warn | error
+      # HTTP API + Prometheus (bind 0.0.0.0 inside the container)
+      GPS_TO_MQTT_HTTP_ENABLED: "true"
+      GPS_TO_MQTT_HTTP_BIND: 0.0.0.0
+      GPS_TO_MQTT_HTTP_PORT: "9090"
+      # GPS_TO_MQTT_HTTP_TOKEN: change-me
+
+      # Network re-broadcast
+      # GPS_TO_MQTT_NMEA_TCP_LISTEN: 0.0.0.0:10110
+      # GPS_TO_MQTT_GPSD_LISTEN: 0.0.0.0:2947
+
       GPS_TO_MQTT_LOG_LEVEL: info
 
-      # ── Prometheus metrics (optional) ────────────────────────────────────────
-      # GPS_TO_MQTT_PROMETHEUS_ENABLED: "false"
-      # GPS_TO_MQTT_PROMETHEUS_PORT: "9090"
-      # GPS_TO_MQTT_PROMETHEUS_BIND: "0.0.0.0"
+    ports:
+      - "127.0.0.1:9090:9090"     # HTTP API / metrics (loopback only)
+      # - "10110:10110"           # NMEA TCP
+      # - "2947:2947"             # gpsd
 
-    # ── Prometheus port (uncomment if metrics enabled above) ─────────────────
-    # ports:
-    #   - "9090:9090"
+    healthcheck:
+      test: ["CMD", "gps-to-mqtt", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
-    # ── Optional: mount a settings.toml instead of / in addition to env vars ──
-    # Env vars always take priority over the file.
+    # secrets:
+    #   - mqtt_password
+
+    # Mount a settings.toml instead of / in addition to env vars (env wins)
     # volumes:
     #   - ./settings.toml:/etc/gps-to-mqtt/settings.toml:ro
+
+# secrets:
+#   mqtt_password:
+#     file: ./mqtt_password.txt

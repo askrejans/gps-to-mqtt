@@ -1,176 +1,294 @@
-//! Configuration management for gps-to-mqtt.
-//!
-//! Loads settings from TOML files (searched in standard locations) and from
-//! `GPS_TO_MQTT_*` environment variables (highest priority).
+//! Configuration: TOML files + `GPS_TO_MQTT_*` environment variables.
 //!
 //! Priority (highest → lowest):
-//! 1. `GPS_TO_MQTT_*` environment variables
-//! 2. Specified config file (`--config`)
-//! 3. Default search paths (`/etc/gps-to-mqtt/`, exe dir, `./`)
+//! 1. `GPS_TO_MQTT_<KEY>` environment variables (e.g. `GPS_TO_MQTT_MQTT_HOST`)
+//! 2. `--config <file>`
+//! 3. Default search paths (`/etc/gps-to-mqtt/settings.toml`, exe dir, `./`)
 //! 4. Built-in defaults
+//!
+//! Keys are flat (`mqtt_host`, not `[mqtt] host`) so every setting maps 1:1 to
+//! an environment variable. List settings accept a TOML array or, from the
+//! environment, a delimited string (`mqtt_formats = "legacy,json"`,
+//! `init_commands = "PMTK220,100;PMTK314,0,1,0,1,1,5,0,0,0,0,0,0,0,0,0,0,0,0,0"`).
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use config::{Config, Environment, File};
-use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::path::{Path, PathBuf};
 
-const VALID_BAUD_RATES: &[u32] = &[9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+pub const VALID_BAUD_RATES: &[u32] = &[
+    4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600,
+];
 
-/// Application configuration — all fields have serde defaults so an empty
-/// (or partially filled) TOML file works without errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionType {
+    /// Local USB / UART receiver
+    Serial,
+    /// TCP client to a serial-to-TCP bridge (io-to-net, ser2net, receiver Wi-Fi module)
+    Tcp,
+    /// NMEA datagrams (marine multiplexers, phone apps, OpenCPN, NMEA routers)
+    Udp,
+    /// Existing gpsd daemon (raw NMEA via `?WATCH`)
+    Gpsd,
+    /// Replay of a recorded NMEA log
+    File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReceiverProfile {
+    /// Any NMEA-0183 receiver; nothing is written to the device.
+    Generic,
+    /// u-blox M8/M9/M10/F9 (UBX-CFG-RATE)
+    Ublox,
+    /// MediaTek MT33xx and derivatives (PMTK220): GlobalTop, Adafruit, Quectel L76/L80
+    Mediatek,
+    /// Quectel LC29H/LC79H/LG69T (PAIR050)
+    Quectel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MqttFormat {
+    /// One retained scalar topic per value (`<base>/LAT`, `<base>/SPD` …) — G86 dashboard
+    Legacy,
+    /// `<base>/fix` and `<base>/sky` JSON documents
+    Json,
+    /// `<base>/position` G86 external-GPS packet (schema 1)
+    G86,
+    /// Home Assistant MQTT discovery (device_tracker + sensors, uses JSON topics)
+    Homeassistant,
+    /// OwnTracks location messages (Home Assistant, Traccar, OwnTracks Recorder)
+    Owntracks,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    /// Optional absolute path for synced canonical NDJSON capture.
-    #[serde(default)]
-    pub telemetry_log: Option<String>,
-    // --- Connection type ---
-    /// GPS input source: `serial` (default) or `tcp`
-    ///
-    /// Use `tcp` to connect to a serial-to-TCP bridge such as
-    /// [io-to-net](https://github.com/askrejans/io-to-net).
+    // ── Source ───────────────────────────────────────────────────────────
     #[serde(default = "default_connection_type")]
-    pub connection_type: String,
-
-    // --- Serial port (used when connection_type = "serial") ---
-    /// Serial device path, e.g. `/dev/ttyUSB0` or `COM3`
+    pub connection_type: ConnectionType,
+    /// Serial device path, or `auto` to detect a GNSS receiver on USB serial ports.
     #[serde(default = "default_port_name")]
     pub port_name: String,
-
-    /// Baud rate for the GPS receiver
-    #[serde(default = "default_baud_rate")]
+    /// Serial baud rate; `0` = auto-detect.
+    #[serde(default)]
     pub baud_rate: u32,
+    pub tcp_host: Option<String>,
+    pub tcp_port: Option<u16>,
+    /// UDP listen address for `connection_type = "udp"`.
+    #[serde(default = "default_udp_bind")]
+    pub udp_bind: String,
+    /// NMEA log for `connection_type = "file"`.
+    pub replay_file: Option<String>,
+    /// Replay speed multiplier (1.0 = real time, 0 = as fast as possible).
+    #[serde(default = "default_replay_speed")]
+    pub replay_speed: f64,
+    #[serde(default)]
+    pub replay_loop: bool,
+    /// Reject sentences without a `*hh` checksum.
+    #[serde(default = "default_true")]
+    pub nmea_require_checksum: bool,
 
-    /// Send a UBX command to switch the receiver to 10 Hz
+    // ── Receiver ─────────────────────────────────────────────────────────
+    #[serde(default = "default_receiver")]
+    pub receiver: ReceiverProfile,
+    /// Navigation rate to configure (1–25 Hz). Unset = leave the device alone.
+    pub update_rate_hz: Option<u32>,
+    /// Legacy switch: equivalent to `receiver = "ublox"` + `update_rate_hz = 10`.
     #[serde(default)]
     pub set_gps_to_10hz: bool,
+    /// Extra commands written after connecting. `PMTK220,100` gets `$`/checksum
+    /// added; `hex:B5 62 …` is sent as raw bytes.
+    #[serde(default, deserialize_with = "list_semicolon")]
+    pub init_commands: Vec<String>,
 
-    // --- TCP bridge (used when connection_type = "tcp") ---
-    /// Hostname or IP of the TCP bridge (e.g. io-to-net)
-    pub tcp_host: Option<String>,
-
-    /// TCP port of the bridge
-    pub tcp_port: Option<u16>,
-
-    // --- MQTT ---
-    /// Enable MQTT publishing (`false` = display-only / TUI mode)
-    #[serde(default = "default_mqtt_enabled")]
+    // ── MQTT ─────────────────────────────────────────────────────────────
+    #[serde(default = "default_true")]
     pub mqtt_enabled: bool,
-
-    /// MQTT broker hostname or IP
     #[serde(default = "default_mqtt_host")]
     pub mqtt_host: String,
-
-    /// MQTT broker port
     #[serde(default = "default_mqtt_port")]
     pub mqtt_port: u16,
-
-    /// MQTT client ID — auto-generated when `None`
+    /// Client ID; auto-generated (unique per process) when unset.
     pub mqtt_client_id: Option<String>,
-
-    /// Base MQTT topic prefix, e.g. `/GOLF86/GPS`
     #[serde(default = "default_mqtt_base_topic")]
     pub mqtt_base_topic: String,
-
-    /// Maximum reconnection attempts; `0` = infinite
+    /// `0` = retry forever.
     #[serde(default)]
     pub mqtt_reconnect_max_attempts: u32,
-
-    /// MQTT broker username (optional)
     pub mqtt_username: Option<String>,
-
-    /// MQTT broker password (optional)
     pub mqtt_password: Option<String>,
-
-    /// Enable TLS for the MQTT connection
+    /// Read the password from a file (Docker/systemd secrets). Overrides `mqtt_password`.
+    pub mqtt_password_file: Option<String>,
     #[serde(default)]
     pub mqtt_use_tls: bool,
+    /// PEM CA bundle for TLS; system roots (webpki) when unset.
+    pub mqtt_ca_file: Option<String>,
+    /// PEM client certificate + key for mutual TLS.
+    pub mqtt_client_cert_file: Option<String>,
+    pub mqtt_client_key_file: Option<String>,
+    #[serde(default = "default_keep_alive")]
+    pub mqtt_keep_alive_s: u64,
+    /// QoS for data topics: 0 or 1.
+    #[serde(default)]
+    pub mqtt_qos: u8,
+    /// Retain flag for legacy/JSON state topics.
+    #[serde(default = "default_true")]
+    pub mqtt_retain: bool,
+    #[serde(default = "default_mqtt_formats", deserialize_with = "list_formats")]
+    pub mqtt_formats: Vec<MqttFormat>,
+    /// Cap for legacy/JSON/OwnTracks publishing (Hz); `0` = every fix. G86 packets are never throttled.
+    #[serde(default)]
+    pub mqtt_max_rate_hz: f64,
+    #[serde(default = "default_ha_prefix")]
+    pub mqtt_homeassistant_prefix: String,
+    /// OwnTracks topic; default `owntracks/gps-to-mqtt/<client_id>`.
+    pub mqtt_owntracks_topic: Option<String>,
+    /// OwnTracks two-character tracker ID.
+    #[serde(default = "default_owntracks_tid")]
+    pub mqtt_owntracks_tid: String,
 
-    // --- Logging ---
-    /// Log level: `trace` | `debug` | `info` | `warn` | `error`
+    // ── HTTP API / Prometheus ────────────────────────────────────────────
+    #[serde(default, alias = "prometheus_enabled")]
+    pub http_enabled: bool,
+    #[serde(default = "default_http_bind", alias = "prometheus_bind")]
+    pub http_bind: String,
+    #[serde(default = "default_http_port", alias = "prometheus_port")]
+    pub http_port: u16,
+    /// Bearer token required for `/api/*` (health and metrics stay open).
+    pub http_token: Option<String>,
+    /// `Access-Control-Allow-Origin` value for browser dashboards (unset = no CORS).
+    pub http_cors_origin: Option<String>,
+    /// Serve the built-in web dashboard at `/` (requires `http_enabled`).
+    #[serde(default = "default_true")]
+    pub http_ui: bool,
+    /// Map tiles behind the dashboard track (`{z}/{x}/{y}` template). Empty =
+    /// no map and no third-party requests. Tile servers learn the viewed area.
+    #[serde(default = "default_map_tiles")]
+    pub http_map_tiles: String,
+    /// Render map tiles dark (colour-inverted). Turn off for natively dark tile sets.
+    #[serde(default = "default_true")]
+    pub http_map_dark: bool,
+    /// Attribution shown on the map (required by OpenStreetMap's licence).
+    #[serde(default = "default_map_attribution")]
+    pub http_map_attribution: String,
+
+    // ── Network re-broadcast ─────────────────────────────────────────────
+    /// NMEA-0183 TCP server, e.g. `0.0.0.0:10110` (OpenCPN, Signal K, chart plotters).
+    pub nmea_tcp_listen: Option<String>,
+    /// NMEA-0183 UDP target, e.g. `255.255.255.255:10110` (broadcast) or `192.168.1.20:10110`.
+    pub nmea_udp_target: Option<String>,
+    /// gpsd-compatible JSON server, e.g. `127.0.0.1:2947` (cgps, gpsmon, Navit, foxtrotgps …).
+    pub gpsd_listen: Option<String>,
+    /// Maximum concurrent clients per TCP server.
+    #[serde(default = "default_max_clients")]
+    pub max_clients: usize,
+
+    // ── Processing ───────────────────────────────────────────────────────
+    #[serde(default = "default_true")]
+    pub telemetry_enabled: bool,
+    #[serde(default = "default_telemetry_smoothing_window")]
+    pub telemetry_smoothing_window: usize,
+    /// Pin the reported position while stationary (removes idle jitter from
+    /// every output except the raw G86 packet).
+    #[serde(default)]
+    pub static_hold: bool,
+    /// Hold engages below this speed.
+    #[serde(default = "default_hold_speed")]
+    pub static_hold_speed_kph: f64,
+    /// Hold releases when the raw position leaves this radius around the held point.
+    #[serde(default = "default_hold_radius")]
+    pub static_hold_radius_m: f64,
+    /// Drop satellites not reported for this long (seconds).
+    #[serde(default = "default_satellite_timeout")]
+    pub satellite_timeout_s: u64,
+    /// Absolute path for the synced canonical NDJSON archive of G86 packets.
+    pub telemetry_log: Option<String>,
+
+    // ── Logging / TUI ────────────────────────────────────────────────────
     #[serde(default = "default_log_level")]
     pub log_level: String,
-
-    /// Emit JSON-structured logs (useful for log aggregation)
     #[serde(default)]
     pub log_json: bool,
-
-    // --- TUI ---
-    /// TUI render interval in milliseconds
     #[serde(default = "default_tui_refresh_rate_ms")]
     pub tui_refresh_rate_ms: u64,
-
-    /// Maximum lines kept in the TUI log ring-buffer
     #[serde(default = "default_max_log_buffer_size")]
     pub max_log_buffer_size: usize,
 
-    // --- Telemetry ---
-    /// Enable telemetry calculations (acceleration, g-forces, distance …)
-    #[serde(default = "default_telemetry_enabled")]
-    pub telemetry_enabled: bool,
-
-    /// Moving-average window for telemetry smoothing
-    #[serde(default = "default_telemetry_smoothing_window")]
-    pub telemetry_smoothing_window: usize,
-
-    // --- Track / lap timing ---
-    /// Lap-timing mode: `disabled` | `manual` | `learn` | `gpx`
-    #[serde(default = "default_track_mode")]
-    pub track_mode: String,
-
-    /// Start/Finish latitude (required for `manual` mode)
-    pub track_start_lat: Option<f64>,
-
-    /// Start/Finish longitude (required for `manual` mode)
-    pub track_start_lon: Option<f64>,
-
-    /// Geofence radius around start/finish in metres
-    #[serde(default = "default_track_geofence_radius")]
-    pub track_geofence_radius: f64,
-
-    /// Path to GPX file (required for `gpx` mode)
-    pub track_gpx_file: Option<String>,
-
-    // --- Prometheus metrics ---
-    /// Expose a Prometheus `/metrics` and `/health` HTTP endpoint
-    #[serde(default)]
-    pub prometheus_enabled: bool,
-
-    /// Port the metrics HTTP server listens on
-    #[serde(default = "default_prometheus_port")]
-    pub prometheus_port: u16,
-
-    /// Address the metrics HTTP server binds to
-    #[serde(default = "default_prometheus_bind")]
-    pub prometheus_bind: String,
-
-    /// Internal: path to the config file that was loaded (set at runtime)
+    /// Path of the file that was loaded (runtime only).
     #[serde(skip)]
     pub config_path: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Default value functions
-// ---------------------------------------------------------------------------
-fn default_port_name() -> String {
-    "/dev/ttyUSB0".to_string()
-}
-fn default_baud_rate() -> u32 {
-    9600
-}
-fn default_mqtt_enabled() -> bool {
+fn default_true() -> bool {
     true
 }
+fn default_connection_type() -> ConnectionType {
+    ConnectionType::Serial
+}
+fn default_port_name() -> String {
+    "auto".into()
+}
+fn default_udp_bind() -> String {
+    "0.0.0.0:10110".into()
+}
+fn default_replay_speed() -> f64 {
+    1.0
+}
+fn default_receiver() -> ReceiverProfile {
+    ReceiverProfile::Generic
+}
 fn default_mqtt_host() -> String {
-    "localhost".to_string()
+    "localhost".into()
 }
 fn default_mqtt_port() -> u16 {
     1883
 }
 fn default_mqtt_base_topic() -> String {
-    "/GOLF86/GPS".to_string()
+    "/GOLF86/GPS".into()
+}
+fn default_keep_alive() -> u64 {
+    30
+}
+fn default_mqtt_formats() -> Vec<MqttFormat> {
+    vec![MqttFormat::Legacy, MqttFormat::Json, MqttFormat::G86]
+}
+fn default_ha_prefix() -> String {
+    "homeassistant".into()
+}
+fn default_owntracks_tid() -> String {
+    "GP".into()
+}
+fn default_http_bind() -> String {
+    "127.0.0.1".into()
+}
+fn default_http_port() -> u16 {
+    9090
+}
+fn default_map_tiles() -> String {
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png".into()
+}
+fn default_map_attribution() -> String {
+    "© OpenStreetMap contributors".into()
+}
+fn default_max_clients() -> usize {
+    16
+}
+fn default_telemetry_smoothing_window() -> usize {
+    3
+}
+fn default_hold_speed() -> f64 {
+    2.0
+}
+fn default_hold_radius() -> f64 {
+    5.0
+}
+fn default_satellite_timeout() -> u64 {
+    10
 }
 fn default_log_level() -> String {
-    "info".to_string()
+    "info".into()
 }
 fn default_tui_refresh_rate_ms() -> u64 {
     100
@@ -178,522 +296,561 @@ fn default_tui_refresh_rate_ms() -> u64 {
 fn default_max_log_buffer_size() -> usize {
     1000
 }
-fn default_telemetry_enabled() -> bool {
-    true
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOrList {
+    One(String),
+    Many(Vec<String>),
 }
-fn default_telemetry_smoothing_window() -> usize {
-    3
+
+fn split_list<'de, D: Deserializer<'de>>(d: D, sep: &[char]) -> Result<Vec<String>, D::Error> {
+    Ok(match StringOrList::deserialize(d)? {
+        StringOrList::One(s) => s
+            .split(sep)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        StringOrList::Many(v) => v,
+    })
 }
-fn default_track_mode() -> String {
-    "disabled".to_string()
+
+fn list_semicolon<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    split_list(d, &[';', '\n'])
 }
-fn default_track_geofence_radius() -> f64 {
-    15.0
-}
-fn default_connection_type() -> String {
-    "serial".to_string()
-}
-fn default_prometheus_port() -> u16 {
-    9090
-}
-fn default_prometheus_bind() -> String {
-    "0.0.0.0".to_string()
+
+fn list_formats<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<MqttFormat>, D::Error> {
+    split_list(d, &[',', ';', ' '])?
+        .into_iter()
+        .map(|s| {
+            MqttFormat::deserialize(serde::de::value::StringDeserializer::<D::Error>::new(
+                s.to_lowercase(),
+            ))
+        })
+        .collect()
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self {
-            telemetry_log: None,
-            connection_type: default_connection_type(),
-            port_name: default_port_name(),
-            baud_rate: default_baud_rate(),
-            set_gps_to_10hz: false,
-            tcp_host: None,
-            tcp_port: None,
-            mqtt_enabled: default_mqtt_enabled(),
-            mqtt_host: default_mqtt_host(),
-            mqtt_port: default_mqtt_port(),
-            mqtt_client_id: None,
-            mqtt_base_topic: default_mqtt_base_topic(),
-            mqtt_reconnect_max_attempts: 0,
-            mqtt_username: None,
-            mqtt_password: None,
-            mqtt_use_tls: false,
-            log_level: default_log_level(),
-            log_json: false,
-            tui_refresh_rate_ms: default_tui_refresh_rate_ms(),
-            max_log_buffer_size: default_max_log_buffer_size(),
-            telemetry_enabled: default_telemetry_enabled(),
-            telemetry_smoothing_window: default_telemetry_smoothing_window(),
-            track_mode: default_track_mode(),
-            track_start_lat: None,
-            track_start_lon: None,
-            track_geofence_radius: default_track_geofence_radius(),
-            track_gpx_file: None,
-            prometheus_enabled: false,
-            prometheus_port: default_prometheus_port(),
-            prometheus_bind: default_prometheus_bind(),
-            config_path: None,
-        }
+        // Every field has a serde default, so an empty document is a valid config.
+        serde_json::from_str("{}").expect("defaults deserialize")
     }
 }
 
 impl AppConfig {
-    /// Validate configuration values.
     pub fn validate(&self) -> Result<()> {
         if self
             .telemetry_log
             .as_ref()
-            .is_some_and(|p| !std::path::Path::new(p).is_absolute())
+            .is_some_and(|p| !Path::new(p).is_absolute())
         {
-            anyhow::bail!("telemetry_log must be an absolute path");
+            bail!("telemetry_log must be an absolute path");
         }
-        let valid_connection_types = ["serial", "tcp"];
-        if !valid_connection_types.contains(&self.connection_type.to_lowercase().as_str()) {
-            anyhow::bail!(
-                "connection_type must be one of: {:?}",
-                valid_connection_types
-            );
+        match self.connection_type {
+            ConnectionType::Serial => {
+                if self.port_name.is_empty() {
+                    bail!("port_name must not be empty (use \"auto\" to detect)");
+                }
+                if self.baud_rate != 0 && !VALID_BAUD_RATES.contains(&self.baud_rate) {
+                    bail!("baud_rate must be 0 (auto) or one of {VALID_BAUD_RATES:?}");
+                }
+            }
+            ConnectionType::Tcp => {
+                if self.tcp_host.as_deref().unwrap_or("").is_empty() {
+                    bail!("tcp_host must be set when connection_type = tcp");
+                }
+                if self.tcp_port.unwrap_or(0) == 0 {
+                    bail!("tcp_port must be set and > 0 when connection_type = tcp");
+                }
+            }
+            ConnectionType::Udp => {
+                self.udp_bind
+                    .parse::<std::net::SocketAddr>()
+                    .context("udp_bind must be an address such as 0.0.0.0:10110")?;
+            }
+            ConnectionType::Gpsd => {}
+            ConnectionType::File => {
+                if self.replay_file.as_deref().unwrap_or("").is_empty() {
+                    bail!("replay_file must be set when connection_type = file");
+                }
+                if !(self.replay_speed.is_finite() && self.replay_speed >= 0.0) {
+                    bail!("replay_speed must be >= 0");
+                }
+            }
         }
-        if self.connection_type == "serial" {
-            if self.port_name.is_empty() {
-                anyhow::bail!("port_name must not be empty when connection_type = serial");
+        if let Some(rate) = self.effective_update_rate() {
+            if !(1..=25).contains(&rate) {
+                bail!("update_rate_hz must be between 1 and 25");
             }
-            if !VALID_BAUD_RATES.contains(&self.baud_rate) {
-                anyhow::bail!("baud_rate must be one of: {:?}", VALID_BAUD_RATES);
-            }
-        }
-        if self.connection_type == "tcp" {
-            if self.tcp_host.as_deref().unwrap_or("").is_empty() {
-                anyhow::bail!("tcp_host must be set when connection_type = tcp");
-            }
-            if self.tcp_port.unwrap_or(0) == 0 {
-                anyhow::bail!("tcp_port must be set and > 0 when connection_type = tcp");
+            if self.effective_receiver() == ReceiverProfile::Generic {
+                bail!("update_rate_hz requires receiver = ublox | mediatek | quectel");
             }
         }
         if self.mqtt_enabled {
             if self.mqtt_host.is_empty() {
-                anyhow::bail!("mqtt_host must not be empty when mqtt_enabled = true");
+                bail!("mqtt_host must not be empty when mqtt_enabled = true");
             }
             if self.mqtt_port == 0 {
-                anyhow::bail!("mqtt_port must be > 0");
+                bail!("mqtt_port must be > 0");
             }
-            if self.mqtt_base_topic.is_empty() {
-                anyhow::bail!("mqtt_base_topic must not be empty");
+            if self.mqtt_base_topic.trim_matches('/').is_empty() {
+                bail!("mqtt_base_topic must not be empty");
+            }
+            if self.mqtt_base_topic.contains(['#', '+']) {
+                bail!("mqtt_base_topic must not contain MQTT wildcards");
+            }
+            if self.mqtt_qos > 1 {
+                bail!("mqtt_qos must be 0 or 1");
+            }
+            if self.mqtt_formats.is_empty() {
+                bail!(
+                    "mqtt_formats must list at least one of legacy, json, g86, homeassistant, owntracks"
+                );
+            }
+            if !(self.mqtt_max_rate_hz.is_finite() && self.mqtt_max_rate_hz >= 0.0) {
+                bail!("mqtt_max_rate_hz must be >= 0");
+            }
+            if self.mqtt_client_cert_file.is_some() != self.mqtt_client_key_file.is_some() {
+                bail!("mqtt_client_cert_file and mqtt_client_key_file must be set together");
+            }
+            if self.mqtt_owntracks_tid.len() > 2 {
+                bail!("mqtt_owntracks_tid must be at most 2 characters");
             }
         }
-        let valid_levels = ["trace", "debug", "info", "warn", "error"];
-        if !valid_levels.contains(&self.log_level.to_lowercase().as_str()) {
-            anyhow::bail!("log_level must be one of: {:?}", valid_levels);
+        let levels = ["trace", "debug", "info", "warn", "error"];
+        if !levels.contains(&self.log_level.to_lowercase().as_str()) {
+            bail!("log_level must be one of: {levels:?}");
         }
-        let valid_track_modes = ["disabled", "manual", "learn", "gpx"];
-        if !valid_track_modes.contains(&self.track_mode.to_lowercase().as_str()) {
-            anyhow::bail!("track_mode must be one of: {:?}", valid_track_modes);
+        if self.http_enabled {
+            if self.http_port == 0 {
+                bail!("http_port must be > 0 when http_enabled = true");
+            }
+            self.http_bind
+                .parse::<std::net::IpAddr>()
+                .context("http_bind must be an IP address such as 127.0.0.1 or 0.0.0.0")?;
         }
-        if self.track_mode == "manual"
-            && (self.track_start_lat.is_none() || self.track_start_lon.is_none())
+        if !self.http_map_tiles.is_empty() {
+            map_origin(&self.http_map_tiles)?;
+        }
+        for (key, value) in [
+            ("nmea_tcp_listen", &self.nmea_tcp_listen),
+            ("nmea_udp_target", &self.nmea_udp_target),
+            ("gpsd_listen", &self.gpsd_listen),
+        ] {
+            if let Some(v) = value {
+                v.parse::<std::net::SocketAddr>()
+                    .with_context(|| format!("{key} must be an address such as 0.0.0.0:10110"))?;
+            }
+        }
+        if self.max_clients == 0 {
+            bail!("max_clients must be > 0");
+        }
+        if !(self.static_hold_speed_kph.is_finite()
+            && (0.1..=20.0).contains(&self.static_hold_speed_kph))
         {
-            anyhow::bail!("track_start_lat and track_start_lon are required for manual track_mode");
+            bail!("static_hold_speed_kph must be between 0.1 and 20");
         }
-        if self.track_mode == "gpx" && self.track_gpx_file.is_none() {
-            anyhow::bail!("track_gpx_file is required for gpx track_mode");
+        if !(self.static_hold_radius_m.is_finite()
+            && (0.5..=100.0).contains(&self.static_hold_radius_m))
+        {
+            bail!("static_hold_radius_m must be between 0.5 and 100");
         }
-        if self.prometheus_enabled {
-            if self.prometheus_port == 0 {
-                anyhow::bail!("prometheus_port must be > 0 when prometheus_enabled = true");
-            }
-            if self.prometheus_bind.is_empty() {
-                anyhow::bail!("prometheus_bind must not be empty when prometheus_enabled = true");
-            }
+        if self.satellite_timeout_s == 0 {
+            bail!("satellite_timeout_s must be > 0");
+        }
+        for cmd in &self.init_commands {
+            crate::receiver::encode_command(cmd)
+                .with_context(|| format!("invalid init_commands entry {cmd:?}"))?;
         }
         Ok(())
     }
 
-    /// Human-readable GPS connection string shown in TUI.
+    /// Settings as JSON with secrets masked (for `--check-config` and `/api/v1/config`).
+    pub fn redacted(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or_default();
+        for key in ["mqtt_password", "http_token"] {
+            if v.get(key).is_some_and(|x| !x.is_null()) {
+                v[key] = "***".into();
+            }
+        }
+        v
+    }
+
+    pub fn effective_receiver(&self) -> ReceiverProfile {
+        if self.set_gps_to_10hz && self.receiver == ReceiverProfile::Generic {
+            ReceiverProfile::Ublox
+        } else {
+            self.receiver
+        }
+    }
+
+    pub fn effective_update_rate(&self) -> Option<u32> {
+        self.update_rate_hz.or(self.set_gps_to_10hz.then_some(10))
+    }
+
+    /// Base topic without trailing slash (`/CAR/GPS/` → `/CAR/GPS`).
+    pub fn base_topic(&self) -> &str {
+        self.mqtt_base_topic.trim_end_matches('/')
+    }
+
+    pub fn wants(&self, format: MqttFormat) -> bool {
+        self.mqtt_formats.contains(&format)
+    }
+
     pub fn connection_display(&self) -> String {
-        if self.connection_type == "tcp" {
-            format!(
+        match self.connection_type {
+            ConnectionType::Serial => {
+                let baud = if self.baud_rate == 0 {
+                    "auto".to_string()
+                } else {
+                    self.baud_rate.to_string()
+                };
+                format!("{} @ {} baud", self.port_name, baud)
+            }
+            ConnectionType::Tcp => format!(
                 "TCP {}:{}",
                 self.tcp_host.as_deref().unwrap_or("?"),
                 self.tcp_port.unwrap_or(0)
-            )
-        } else {
-            format!("{} @ {} baud", self.port_name, self.baud_rate)
+            ),
+            ConnectionType::Udp => format!("UDP {}", self.udp_bind),
+            ConnectionType::Gpsd => format!("gpsd {}", self.gpsd_address()),
+            ConnectionType::File => {
+                format!("replay {}", self.replay_file.as_deref().unwrap_or("?"))
+            }
         }
     }
 
-    /// Human-readable MQTT broker address shown in TUI.
+    pub fn gpsd_address(&self) -> String {
+        format!(
+            "{}:{}",
+            self.tcp_host.as_deref().unwrap_or("127.0.0.1"),
+            self.tcp_port.unwrap_or(2947)
+        )
+    }
+
     pub fn mqtt_address(&self) -> String {
         format!("{}:{}", self.mqtt_host, self.mqtt_port)
     }
+
+    /// Password from `mqtt_password_file` (trimmed) or `mqtt_password`.
+    pub fn mqtt_password(&self) -> Result<Option<String>> {
+        match &self.mqtt_password_file {
+            Some(path) => Ok(Some(
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("reading mqtt_password_file {path}"))?
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string(),
+            )),
+            None => Ok(self.mqtt_password.clone()),
+        }
+    }
 }
 
-/// Load configuration from TOML file(s) and `GPS_TO_MQTT_*` environment variables.
-///
-/// Search order for config files (all found files are merged, later wins):
-/// 1. `/usr/etc/g86-car-telemetry/gps-to-mqtt.toml`
-/// 2. `/etc/g86-car-telemetry/gps-to-mqtt.toml`
-/// 3. `/etc/gps-to-mqtt/settings.toml`
-/// 4. `<exe-dir>/settings.toml` and `<exe-dir>/gps-to-mqtt.toml`
-/// 5. `./settings.toml` and `./gps-to-mqtt.toml`
-///
-/// Environment variables (`GPS_TO_MQTT_PORT_NAME`, etc.) override everything.
+/// Validate a tile URL template and return its origin (`https://host[:port]`)
+/// for the dashboard's Content-Security-Policy.
+pub fn map_origin(template: &str) -> Result<String> {
+    let rest = template
+        .strip_prefix("https://")
+        .map(|r| ("https://", r))
+        .or_else(|| template.strip_prefix("http://").map(|r| ("http://", r)));
+    let Some((scheme, rest)) = rest else {
+        bail!("http_map_tiles must start with https:// (or http://)");
+    };
+    for placeholder in ["{z}", "{x}", "{y}"] {
+        if !template.contains(placeholder) {
+            bail!("http_map_tiles must contain {{z}}, {{x}} and {{y}}");
+        }
+    }
+    // The origin is copied into a response header: allow URL characters only.
+    let allowed = |c: char| c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&()*+,=%{}".contains(c);
+    if !template.chars().all(allowed) || template.contains("'") {
+        bail!("http_map_tiles contains characters that are not allowed in a URL");
+    }
+    let host = rest.split('/').next().unwrap_or_default();
+    if host.is_empty() || host.contains(['{', '}']) {
+        bail!("http_map_tiles must use a fixed host name");
+    }
+    Ok(format!("{scheme}{host}"))
+}
+
+/// Standard config locations, lowest priority first.
+fn search_paths() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = [
+        "/usr/etc/g86-car-telemetry/gps-to-mqtt.toml",
+        "/etc/g86-car-telemetry/gps-to-mqtt.toml",
+        "/etc/gps-to-mqtt/settings.toml",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        paths.push(dir.join("settings.toml"));
+        paths.push(dir.join("gps-to-mqtt.toml"));
+    }
+    paths.push("settings.toml".into());
+    paths.push("gps-to-mqtt.toml".into());
+    paths
+}
+
+fn environment(source: Option<config::Map<String, String>>) -> Environment {
+    // No key separator: GPS_TO_MQTT_MQTT_HOST must map to the flat key
+    // `mqtt_host`, not to a nested `mqtt.host`.
+    Environment::with_prefix("GPS_TO_MQTT")
+        .prefix_separator("_")
+        .try_parsing(true)
+        .source(source)
+}
+
+fn build(config_path: Option<&str>, env: Option<config::Map<String, String>>) -> Result<AppConfig> {
+    let mut builder = Config::builder();
+    let loaded_from = match config_path {
+        Some(path) => {
+            builder = builder.add_source(File::with_name(path).required(true));
+            Some(path.to_string())
+        }
+        None => {
+            let mut found = None;
+            for path in search_paths().into_iter().filter(|p| p.exists()) {
+                found = Some(path.display().to_string());
+                builder = builder.add_source(File::from(path).required(false));
+            }
+            found
+        }
+    };
+    builder = builder.add_source(environment(env));
+    let mut cfg: AppConfig = builder
+        .build()
+        .context("failed to read configuration")?
+        .try_deserialize()
+        .context("invalid configuration")?;
+    cfg.config_path = loaded_from;
+    cfg.validate()?;
+    Ok(cfg)
+}
+
+/// Load `.env`, config files and environment, then validate.
 pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
     dotenvy::dotenv().ok();
-
-    let mut builder = Config::builder();
-
-    let loaded_from = if let Some(path) = config_path {
-        builder = builder.add_source(File::with_name(path).required(true));
-        Some(path.to_string())
-    } else {
-        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-
-        for loc in &[
-            "/usr/etc/g86-car-telemetry/gps-to-mqtt.toml",
-            "/etc/g86-car-telemetry/gps-to-mqtt.toml",
-            "/etc/gps-to-mqtt/settings.toml",
-        ] {
-            candidates.push(std::path::PathBuf::from(loc));
-        }
-
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                candidates.push(parent.join("settings.toml"));
-                candidates.push(parent.join("gps-to-mqtt.toml"));
-            }
-        }
-
-        candidates.push(std::path::PathBuf::from("./settings.toml"));
-        candidates.push(std::path::PathBuf::from("./gps-to-mqtt.toml"));
-
-        let mut found_path = None;
-        for path in &candidates {
-            if path.exists() {
-                builder = builder.add_source(File::from(path.clone()).required(false));
-                found_path = Some(path.display().to_string());
-            }
-        }
-
-        if found_path.is_none() {
-            warn!("No configuration file found; using defaults and environment variables");
-        }
-
-        found_path
-    };
-
-    // GPS_TO_MQTT_ environment variable overrides (highest priority)
-    builder = builder.add_source(
-        Environment::with_prefix("GPS_TO_MQTT")
-            .separator("_")
-            .try_parsing(true),
-    );
-
-    let settings = builder
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build configuration: {}", e))?;
-
-    let mut app_config: AppConfig = settings
-        .try_deserialize()
-        .map_err(|e| anyhow::anyhow!("Failed to parse configuration: {}", e))?;
-
-    app_config.config_path = loaded_from;
-    app_config.validate()?;
-
-    match &app_config.config_path {
-        Some(path) => info!("Configuration loaded from: {}", path),
-        None => info!("Configuration loaded from defaults and environment"),
-    }
-
-    Ok(app_config)
+    build(config_path, None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // --- defaults ---
-
-    #[test]
-    fn test_default_config_has_sensible_values() {
-        let c = AppConfig::default();
-        assert_eq!(c.baud_rate, 9600);
-        assert_eq!(c.mqtt_host, "localhost");
-        assert_eq!(c.mqtt_port, 1883);
-        assert!(c.mqtt_enabled);
-        assert_eq!(c.log_level, "info");
-        assert_eq!(c.track_mode, "disabled");
-        assert_eq!(c.tui_refresh_rate_ms, 100);
-        assert!(!c.log_json);
-        assert!(!c.set_gps_to_10hz);
+    fn env(pairs: &[(&str, &str)]) -> Option<config::Map<String, String>> {
+        Some(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
     }
 
-    // --- validation: port ---
-
-    #[test]
-    fn test_validate_default_config_passes() {
-        assert!(AppConfig::default().validate().is_ok());
+    fn toml(contents: &str) -> tempfile_path::TempToml {
+        tempfile_path::TempToml::new(contents)
     }
 
-    #[test]
-    fn test_validate_empty_port_name_fails() {
-        let mut c = AppConfig::default();
-        c.port_name = String::new();
-        assert!(c.validate().is_err());
-    }
-
-    // --- validation: baud rate ---
-
-    #[test]
-    fn test_validate_invalid_baud_rate_fails() {
-        let mut c = AppConfig::default();
-        c.baud_rate = 12345;
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_all_supported_baud_rates_pass() {
-        for &rate in VALID_BAUD_RATES {
-            let mut c = AppConfig::default();
-            c.baud_rate = rate;
-            assert!(c.validate().is_ok(), "baud_rate {} should be valid", rate);
+    mod tempfile_path {
+        pub struct TempToml(pub std::path::PathBuf);
+        impl TempToml {
+            pub fn new(contents: &str) -> Self {
+                static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let path = std::env::temp_dir().join(format!(
+                    "gps-to-mqtt-test-{}-{}.toml",
+                    std::process::id(),
+                    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                std::fs::write(&path, contents).unwrap();
+                Self(path)
+            }
+            pub fn path(&self) -> &str {
+                self.0.to_str().unwrap()
+            }
+        }
+        impl Drop for TempToml {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
         }
     }
 
-    // --- validation: MQTT ---
-
     #[test]
-    fn test_validate_mqtt_empty_host_when_enabled_fails() {
-        let mut c = AppConfig::default();
-        c.mqtt_enabled = true;
-        c.mqtt_host = String::new();
-        assert!(c.validate().is_err());
+    fn defaults_are_plug_and_play() {
+        let c = AppConfig::default();
+        assert_eq!(c.connection_type, ConnectionType::Serial);
+        assert_eq!(c.port_name, "auto");
+        assert_eq!(c.baud_rate, 0);
+        assert_eq!(c.receiver, ReceiverProfile::Generic);
+        assert_eq!(c.mqtt_formats, default_mqtt_formats());
+        assert_eq!(c.http_bind, "127.0.0.1");
+        assert!(c.validate().is_ok());
     }
 
     #[test]
-    fn test_validate_mqtt_disabled_empty_host_passes() {
+    fn multi_word_env_vars_reach_flat_keys() {
+        // Regression: a "_" key separator used to turn MQTT_HOST into mqtt.host.
+        let f = toml("");
+        let c = build(
+            Some(f.path()),
+            env(&[
+                ("GPS_TO_MQTT_MQTT_HOST", "broker.lan"),
+                ("GPS_TO_MQTT_MQTT_PORT", "8883"),
+                ("GPS_TO_MQTT_CONNECTION_TYPE", "tcp"),
+                ("GPS_TO_MQTT_TCP_HOST", "10.0.0.2"),
+                ("GPS_TO_MQTT_TCP_PORT", "9001"),
+                ("GPS_TO_MQTT_MQTT_FORMATS", "legacy, homeassistant"),
+                ("GPS_TO_MQTT_MQTT_PASSWORD", "12345"),
+                ("GPS_TO_MQTT_INIT_COMMANDS", "PMTK220,100;PMTK251,115200"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(c.mqtt_host, "broker.lan");
+        assert_eq!(c.mqtt_port, 8883);
+        assert_eq!(c.connection_type, ConnectionType::Tcp);
+        assert_eq!(c.tcp_port, Some(9001));
+        assert_eq!(
+            c.mqtt_formats,
+            [MqttFormat::Legacy, MqttFormat::Homeassistant]
+        );
+        assert_eq!(c.mqtt_password.as_deref(), Some("12345"));
+        assert_eq!(c.init_commands, ["PMTK220,100", "PMTK251,115200"]);
+    }
+
+    #[test]
+    fn env_overrides_file_and_legacy_keys_are_accepted() {
+        let f = toml(
+            r#"
+            mqtt_host = "file-host"
+            baud_rate = 9600
+            port_name = "/dev/ttyACM0"
+            prometheus_enabled = true
+            prometheus_port = 9100
+            set_gps_to_10hz = true
+            track_mode = "disabled"
+            "#,
+        );
+        let c = build(
+            Some(f.path()),
+            env(&[("GPS_TO_MQTT_MQTT_HOST", "env-host")]),
+        )
+        .unwrap();
+        assert_eq!(c.mqtt_host, "env-host");
+        assert_eq!(c.baud_rate, 9600);
+        assert!(c.http_enabled);
+        assert_eq!(c.http_port, 9100);
+        assert_eq!(c.effective_receiver(), ReceiverProfile::Ublox);
+        assert_eq!(c.effective_update_rate(), Some(10));
+    }
+
+    #[test]
+    fn invalid_values_are_rejected() {
+        let cases: Vec<Box<dyn Fn(&mut AppConfig)>> = vec![
+            Box::new(|c| c.baud_rate = 12345),
+            Box::new(|c| c.port_name.clear()),
+            Box::new(|c| c.mqtt_host.clear()),
+            Box::new(|c| c.mqtt_port = 0),
+            Box::new(|c| c.mqtt_base_topic = "/".into()),
+            Box::new(|c| c.mqtt_base_topic = "a/#".into()),
+            Box::new(|c| c.mqtt_qos = 2),
+            Box::new(|c| c.mqtt_formats.clear()),
+            Box::new(|c| c.mqtt_client_cert_file = Some("c.pem".into())),
+            Box::new(|c| c.log_level = "verbose".into()),
+            Box::new(|c| c.telemetry_log = Some("relative.ndjson".into())),
+            Box::new(|c| c.connection_type = ConnectionType::Tcp),
+            Box::new(|c| c.connection_type = ConnectionType::File),
+            Box::new(|c| {
+                c.connection_type = ConnectionType::Udp;
+                c.udp_bind = "nope".into()
+            }),
+            Box::new(|c| c.update_rate_hz = Some(10)),
+            Box::new(|c| {
+                c.receiver = ReceiverProfile::Ublox;
+                c.update_rate_hz = Some(50)
+            }),
+            Box::new(|c| {
+                c.http_enabled = true;
+                c.http_bind = "localhost:80".into()
+            }),
+            Box::new(|c| c.nmea_tcp_listen = Some("10110".into())),
+            Box::new(|c| c.init_commands = vec!["hex:zz".into()]),
+        ];
+        for (i, mutate) in cases.iter().enumerate() {
+            let mut c = AppConfig::default();
+            mutate(&mut c);
+            assert!(c.validate().is_err(), "case {i} should fail");
+        }
+    }
+
+    #[test]
+    fn mqtt_disabled_skips_mqtt_validation() {
         let mut c = AppConfig::default();
         c.mqtt_enabled = false;
-        c.mqtt_host = String::new();
+        c.mqtt_host.clear();
         assert!(c.validate().is_ok());
     }
 
     #[test]
-    fn test_validate_mqtt_port_zero_fails() {
-        let mut c = AppConfig::default();
-        c.mqtt_enabled = true;
-        c.mqtt_port = 0;
-        assert!(c.validate().is_err());
+    fn unknown_format_is_an_error() {
+        let f = toml(r#"mqtt_formats = ["legacy", "kml"]"#);
+        assert!(build(Some(f.path()), env(&[])).is_err());
     }
 
     #[test]
-    fn test_validate_mqtt_empty_base_topic_fails() {
+    fn helpers() {
         let mut c = AppConfig::default();
-        c.mqtt_enabled = true;
-        c.mqtt_base_topic = String::new();
-        assert!(c.validate().is_err());
-    }
-
-    // --- validation: log level ---
-
-    #[test]
-    fn test_validate_invalid_log_level_fails() {
-        let mut c = AppConfig::default();
-        c.log_level = "verbose".to_string();
-        assert!(c.validate().is_err());
+        c.mqtt_base_topic = "/CAR/GPS/".into();
+        assert_eq!(c.base_topic(), "/CAR/GPS");
+        assert_eq!(c.mqtt_address(), "localhost:1883");
+        assert_eq!(c.connection_display(), "auto @ auto baud");
+        c.connection_type = ConnectionType::Gpsd;
+        assert_eq!(c.connection_display(), "gpsd 127.0.0.1:2947");
     }
 
     #[test]
-    fn test_validate_all_valid_log_levels_pass() {
-        for level in &["trace", "debug", "info", "warn", "error"] {
-            let mut c = AppConfig::default();
-            c.log_level = level.to_string();
-            assert!(
-                c.validate().is_ok(),
-                "log_level '{}' should be valid",
-                level
-            );
+    fn secrets_are_redacted() {
+        let mut c = AppConfig::default();
+        c.mqtt_password = Some("pw".into());
+        let v = c.redacted();
+        assert_eq!(v["mqtt_password"], "***");
+        assert!(v["http_token"].is_null());
+        assert_eq!(v["mqtt_host"], "localhost");
+    }
+
+    #[test]
+    fn map_tile_templates() {
+        assert_eq!(
+            map_origin(&default_map_tiles()).unwrap(),
+            "https://tile.openstreetmap.org"
+        );
+        assert_eq!(
+            map_origin("http://10.0.0.5:8080/osm/{z}/{x}/{y}.png").unwrap(),
+            "http://10.0.0.5:8080"
+        );
+        for bad in [
+            "tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://tile.openstreetmap.org/{z}/{x}.png",
+            "https://{s}.tile.example/{z}/{x}/{y}.png",
+            "https://evil.example/{z}/{x}/{y}.png; script-src *",
+            "https://evil.example/{z}/{x}/{y}.png'",
+        ] {
+            assert!(map_origin(bad).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn test_validate_log_level_case_insensitive() {
         let mut c = AppConfig::default();
-        c.log_level = "INFO".to_string();
-        assert!(c.validate().is_ok());
+        c.http_map_tiles.clear();
+        assert!(c.validate().is_ok(), "empty disables the map");
     }
 
-    // --- validation: track mode ---
-
     #[test]
-    fn test_validate_invalid_track_mode_fails() {
+    fn password_file_is_trimmed() {
+        let f = toml("s3cret\n");
         let mut c = AppConfig::default();
-        c.track_mode = "gps_auto".to_string();
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_manual_mode_without_coords_fails() {
-        let mut c = AppConfig::default();
-        c.track_mode = "manual".to_string();
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_manual_mode_with_coords_passes() {
-        let mut c = AppConfig::default();
-        c.track_mode = "manual".to_string();
-        c.track_start_lat = Some(40.7128);
-        c.track_start_lon = Some(-74.0060);
-        assert!(c.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_gpx_mode_without_file_fails() {
-        let mut c = AppConfig::default();
-        c.track_mode = "gpx".to_string();
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_gpx_mode_with_file_passes() {
-        let mut c = AppConfig::default();
-        c.track_mode = "gpx".to_string();
-        c.track_gpx_file = Some("/path/to/track.gpx".to_string());
-        assert!(c.validate().is_ok());
-    }
-
-    // --- helpers ---
-
-    #[test]
-    fn test_mqtt_address() {
-        let mut c = AppConfig::default();
-        c.mqtt_host = "broker.example.com".to_string();
-        c.mqtt_port = 8883;
-        assert_eq!(c.mqtt_address(), "broker.example.com:8883");
-    }
-
-    #[test]
-    fn test_mqtt_address_default() {
-        assert_eq!(AppConfig::default().mqtt_address(), "localhost:1883");
-    }
-
-    // --- validation: connection_type ---
-
-    #[test]
-    fn test_default_connection_type_is_serial() {
-        let c = AppConfig::default();
-        assert_eq!(c.connection_type, "serial");
-    }
-
-    #[test]
-    fn test_validate_invalid_connection_type_fails() {
-        let mut c = AppConfig::default();
-        c.connection_type = "usb".to_string();
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_tcp_without_host_fails() {
-        let mut c = AppConfig::default();
-        c.connection_type = "tcp".to_string();
-        c.tcp_port = Some(9001);
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_tcp_without_port_fails() {
-        let mut c = AppConfig::default();
-        c.connection_type = "tcp".to_string();
-        c.tcp_host = Some("192.168.1.10".to_string());
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_tcp_port_zero_fails() {
-        let mut c = AppConfig::default();
-        c.connection_type = "tcp".to_string();
-        c.tcp_host = Some("192.168.1.10".to_string());
-        c.tcp_port = Some(0);
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_tcp_with_host_and_port_passes() {
-        let mut c = AppConfig::default();
-        c.connection_type = "tcp".to_string();
-        c.tcp_host = Some("192.168.1.10".to_string());
-        c.tcp_port = Some(9001);
-        assert!(c.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_serial_skips_tcp_fields() {
-        // TCP fields absent — should still pass when connection_type = serial
-        let c = AppConfig::default();
-        assert_eq!(c.connection_type, "serial");
-        assert!(c.tcp_host.is_none());
-        assert!(c.tcp_port.is_none());
-        assert!(c.validate().is_ok());
-    }
-
-    // --- connection_display ---
-
-    #[test]
-    fn test_connection_display_serial() {
-        let mut c = AppConfig::default();
-        c.port_name = "/dev/ttyUSB0".to_string();
-        c.baud_rate = 115200;
-        assert_eq!(c.connection_display(), "/dev/ttyUSB0 @ 115200 baud");
-    }
-
-    #[test]
-    fn test_connection_display_tcp() {
-        let mut c = AppConfig::default();
-        c.connection_type = "tcp".to_string();
-        c.tcp_host = Some("192.168.1.10".to_string());
-        c.tcp_port = Some(9001);
-        assert_eq!(c.connection_display(), "TCP 192.168.1.10:9001");
-    }
-
-    // --- validation: prometheus ---
-
-    #[test]
-    fn test_default_prometheus_disabled() {
-        let c = AppConfig::default();
-        assert!(!c.prometheus_enabled);
-        assert_eq!(c.prometheus_port, 9090);
-        assert_eq!(c.prometheus_bind, "0.0.0.0");
-    }
-
-    #[test]
-    fn test_validate_prometheus_enabled_with_defaults_passes() {
-        let mut c = AppConfig::default();
-        c.prometheus_enabled = true;
-        assert!(c.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_prometheus_port_zero_fails() {
-        let mut c = AppConfig::default();
-        c.prometheus_enabled = true;
-        c.prometheus_port = 0;
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_prometheus_empty_bind_fails() {
-        let mut c = AppConfig::default();
-        c.prometheus_enabled = true;
-        c.prometheus_bind = String::new();
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_prometheus_disabled_ignores_port() {
-        let mut c = AppConfig::default();
-        c.prometheus_enabled = false;
-        c.prometheus_port = 0; // would fail if enabled
-        assert!(c.validate().is_ok());
+        c.mqtt_password = Some("ignored".into());
+        c.mqtt_password_file = Some(f.path().into());
+        assert_eq!(c.mqtt_password().unwrap().as_deref(), Some("s3cret"));
     }
 }

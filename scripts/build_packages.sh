@@ -78,7 +78,7 @@ PKG_NAME="gps-to-mqtt"
 PKG_VERSION="$(grep '^version' "$PROJECT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 PKG_DESCRIPTION="GPS to MQTT bridge service"
 PKG_MAINTAINER="askrejans <arvis.skrejans@gmail.com>"
-PKG_LICENSE="MIT"
+PKG_LICENSE="GPL-3.0-only"
 PKG_URL="https://github.com/askrejans/gps-to-mqtt"
 SERVICE_FILE="$PROJECT_DIR/gps-to-mqtt.service"
 
@@ -261,6 +261,10 @@ build_deb() {
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$config_dir/settings.toml.example"
 
+    # GPL-3.0: ship the licence text (Debian policy location)
+    mkdir -p "$pkg_root/usr/share/doc/$PKG_NAME"
+    cp "$PROJECT_DIR/LICENSE" "$pkg_root/usr/share/doc/$PKG_NAME/copyright"
+
     cat > "$debian_dir/control" <<EOF
 Package: $PKG_NAME
 Version: $PKG_VERSION
@@ -334,6 +338,7 @@ build_rpm() {
         cp "$SERVICE_FILE" "$rpm_sources/${PKG_NAME}.service"
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$rpm_sources/settings.toml.example"
+    cp "$PROJECT_DIR/LICENSE" "$rpm_sources/LICENSE"
 
     local spec_file="$rpm_specs/${PKG_NAME}.spec"
     cat > "$spec_file" <<EOF
@@ -368,6 +373,7 @@ install -m644 %{_sourcedir}/${PKG_NAME}.service %{buildroot}%{_unitdir}/${PKG_NA
 mkdir -p %{buildroot}%{_sysconfdir}/$PKG_NAME
 install -m644 %{_sourcedir}/settings.toml.example \
               %{buildroot}%{_sysconfdir}/$PKG_NAME/settings.toml.example
+cp %{_sourcedir}/LICENSE %{_builddir}/LICENSE
 
 %pre
 getent group  dialout >/dev/null || groupadd -r dialout || true
@@ -376,6 +382,7 @@ getent passwd gps >/dev/null || \
             -G dialout,tty gps || true
 
 %files
+%license LICENSE
 %{_bindir}/$PKG_NAME
 %{_unitdir}/${PKG_NAME}.service
 %dir %{_sysconfdir}/$PKG_NAME
@@ -467,6 +474,7 @@ build_win_zip() {
     cp "$bin_path" "$stage_dir/${PKG_NAME}.exe"
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$stage_dir/settings.toml.example"
+    cp "$PROJECT_DIR/LICENSE" "$stage_dir/LICENSE"
     cat > "$stage_dir/README.txt" <<EOF
 gps-to-mqtt v$PKG_VERSION – Windows
 
@@ -510,6 +518,7 @@ build_mac_targz() {
     chmod 755 "$stage_dir/$PKG_NAME"
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$stage_dir/settings.toml.example"
+    cp "$PROJECT_DIR/LICENSE" "$stage_dir/LICENSE"
 
     local tgz_file="$MAC_DIR/${PKG_NAME}_${PKG_VERSION}_${arch_label}.tar.gz"
     tar -czf "$tgz_file" -C "$stage_dir" .

@@ -23,11 +23,15 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone)]
 pub struct TuiWriter {
     buffer: Arc<Mutex<VecDeque<String>>>,
+    capacity: usize,
 }
 
 impl TuiWriter {
-    pub fn new(buffer: Arc<Mutex<VecDeque<String>>>) -> Self {
-        Self { buffer }
+    pub fn new(buffer: Arc<Mutex<VecDeque<String>>>, capacity: usize) -> Self {
+        Self {
+            buffer,
+            capacity: capacity.max(1),
+        }
     }
 }
 
@@ -36,8 +40,8 @@ impl Write for TuiWriter {
         if let Ok(s) = std::str::from_utf8(buf) {
             let trimmed = s.trim_end_matches('\n');
             if !trimmed.is_empty() {
-                let mut guard = self.buffer.lock().unwrap();
-                if guard.len() >= 500 {
+                let mut guard = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.len() >= self.capacity {
                     guard.pop_front();
                 }
                 guard.push_back(trimmed.to_string());
@@ -65,7 +69,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TuiWriter {
 /// Initialize logging for service / daemon mode.
 ///
 /// Writes to stdout — pretty text or JSON depending on `config.log_json`.
-pub fn init_logging_service(config: &AppConfig) {
+pub fn init_service(config: &AppConfig) {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 
@@ -75,9 +79,11 @@ pub fn init_logging_service(config: &AppConfig) {
             .json()
             .init();
     } else {
+        // No colour codes when stdout is journald, a pipe or a file.
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(true)
+            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
             .init();
     }
 }
@@ -86,7 +92,7 @@ pub fn init_logging_service(config: &AppConfig) {
 ///
 /// All log output is captured by `writer` and fed into the on-screen log panel;
 /// nothing is written to stdout so the terminal display stays clean.
-pub fn init_logging_tui(config: &AppConfig, writer: TuiWriter) {
+pub fn init_tui(config: &AppConfig, writer: TuiWriter) {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 
@@ -95,4 +101,21 @@ pub fn init_logging_tui(config: &AppConfig, writer: TuiWriter) {
         .with_ansi(false)
         .with_writer(writer)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tui_writer_respects_capacity() {
+        let buf = Arc::new(Mutex::new(VecDeque::new()));
+        let mut w = TuiWriter::new(buf.clone(), 3);
+        for i in 0..5 {
+            // tracing-subscriber formats a whole record, then writes it once.
+            w.write_all(format!("line {i}\n").as_bytes()).unwrap();
+        }
+        let lines: Vec<String> = buf.lock().unwrap().iter().cloned().collect();
+        assert_eq!(lines, ["line 2", "line 3", "line 4"]);
+    }
 }

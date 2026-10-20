@@ -1,0 +1,15 @@
+# cargo-audit policy for gps-to-mqtt.
+#
+# rumqttc 0.25.1 (latest official release) depends on rustls-webpki 0.102.8 only
+# to name `webpki::Error` in its TLS error enum. Certificate verification is
+# performed by rustls 0.23 with rustls-webpki 0.103.x (patched), so the
+# vulnerable CRL / name-constraint code in 0.102.8 is never executed.
+# Remove these entries when rumqttc drops the 0.102 dependency.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0049", # rustls-webpki 0.102: CRL distribution point matching
+    "RUSTSEC-2026-0098", # rustls-webpki 0.102: URI name constraints
+    "RUSTSEC-2026-0099", # rustls-webpki 0.102: wildcard name constraints
+    "RUSTSEC-2026-0104", # rustls-webpki 0.102: CRL parsing panic
+    "RUSTSEC-2025-0134", # rustls-pemfile unmaintained (rumqttc PEM loading)
+]

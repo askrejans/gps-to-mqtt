@@ -1,83 +1,68 @@
-# GPS-to-MQTT
+# gps-to-mqtt
 
-A Rust application that bridges GPS hardware to MQTT-based systems, enabling real-time GPS data integration into IoT and telemetry applications. It reads NMEA-0183 format data from USB GPS dongles or a TCP bridge, processes the various sentence types, and publishes parsed information to configurable MQTT topics. Supports an interactive terminal UI for standalone/bench use, full racing telemetry, and fully optional MQTT so the app can run display-only without any broker.
+Plug-and-play GNSS gateway. Connect any NMEA-0183 receiver (USB, serial, TCP
+bridge, UDP or gpsd) and publish coherent, timestamped fixes to MQTT, a REST /
+SSE API with a built-in web dashboard, Prometheus, NMEA-0183 TCP/UDP and a
+gpsd-compatible server. Written in Rust; runs on a Raspberry Pi, in Docker,
+as a systemd service or interactively with a terminal dashboard.
 
 ![gps](https://github.com/user-attachments/assets/14f42bc3-59a6-4973-99da-32b818c8b44e)
 
-### Key Capabilities
+## Highlights
 
-- **GPS Data Processing** – Reads and parses standard NMEA-0183 sentences including position, speed, course, heading, accuracy and satellite information
-- **Dual Input Modes** – Connect via a local serial port **or** a TCP bridge (e.g. [io-to-net](https://github.com/askrejans/io-to-net)) — configurable with a single setting
-- **Real-time MQTT Publishing** – Converts GPS data into structured MQTT messages with configurable topics and QoS levels
-- **High-Frequency Updates** – Optional 10 Hz update rate on compatible u-blox GPS modules
-- **Flexible Configuration** – TOML config file, environment variables with `GPS_TO_MQTT_` prefix, and automatic `.env` file loading from the working directory
-- **Automatic Mode Detection** – Runs the interactive TUI when attached to a terminal; falls back to structured service logging when run as a daemon
-- **Racing Telemetry** – Real-time acceleration, g-forces, yaw rate, lap timing with sector support, braking detection and distance tracking
-- **Prometheus Metrics** – Optional HTTP metrics endpoint and JSON health check for observability
+- **Zero configuration for USB receivers.** `port_name = "auto"` finds the receiver
+  (u-blox, MediaTek, Quectel, Garmin, PL2303, CP210x, CH34x, FTDI …) and
+  auto-detects the baud rate. Re-plugging is handled.
+- **Any constellation, any NMEA version.** GPS, GLONASS, Galileo, BeiDou, QZSS,
+  NavIC, SBAS; NMEA 2.x – 4.11. Strict checksums and bounded parsing.
+- **Correct high rates.** u-blox/MediaTek profiles set 1–25 Hz *and* make it fit
+  the link: trimmed sentence set, automatic 115200 baud, verified with fallback.
+  Measured: a true 10 Hz with RMC+GGA every epoch on a u-blox M8030.
+- **One fix per epoch.** RMC/GGA/GNS grouped by receiver time; derived dynamics
+  (g-forces, yaw, distance, braking) use receiver time, not arrival time.
+- **MGRS** 10-digit (1 m) and 8-digit (10 m) military grid references in every output.
+- **Static hold** (optional): pins the position while parked, so idle jitter doesn't move coordinates.
+- **Industry-standard outputs.** MQTT (scalar topics, JSON, Home Assistant
+  discovery, OwnTracks, G86 app packet), HTTP REST/SSE/GeoJSON, Prometheus,
+  NMEA-0183 over TCP/UDP (port 10110), gpsd JSON (port 2947).
+- **Web dashboard**: Drive, Navigation (dark OpenStreetMap track), Satellites, System and Configuration modes.
+- **Resilient.** Slow or offline outputs never block acquisition. Reconnects
+  with backoff; health reflects real fix freshness.
 
-### Hardware Compatibility
+## Quick start
 
-The software supports standard NMEA-0183 protocols and has been primarily tested with the **TOPGNSS GN800G GPS module** (M8030-KT chipset). The 10 Hz high-frequency mode specifically targets u-blox compatible devices — use it at your own risk on untested hardware.
+```bash
+cargo build --release
+./target/release/gps-to-mqtt
+```
 
-### Use Cases
+On a terminal this opens the dashboard and starts looking for a receiver.
+Without a config file it publishes to an MQTT broker on `localhost:1883`.
 
-- Car racing telemetry and lap timing
-- Vehicle tracking and fleet management
-- IoT sensor data collection
-- Navigation and telemetry system integration
+```bash
+# Which port is my receiver on?
+gps-to-mqtt --list-ports --probe
 
-> **Note**: This is an ongoing development project. Contributions and feedback are welcome to improve compatibility and features.
+# Validate a config without starting
+gps-to-mqtt --check-config -c settings.toml
 
-## Features
-
-- 📡 Reads NMEA-0183 GPS data from USB GPS dongles or a TCP bridge
-- 🔄 Support for 10 Hz GPS update rate (u-blox devices only)
-- 🛰️ Parses multiple NMEA sentence types (GSV, GGA, RMC, VTG, GSA, GLL, TXT, GNS, GST, ROT, HDT, PUBX)
-- 🏁 Racing telemetry: acceleration, g-forces, lap timing, distance tracking, braking detection
-- 📊 Publishes parsed data to MQTT topics (retained, QoS 0)
-- 🖥️ Interactive TUI with satellite sky-view, live data panels and scrolling log
-- 🌍 Multi-GNSS support (GPS, GLONASS, Galileo, BeiDou)
-- 📈 Optional Prometheus metrics + HTTP health endpoint
-
-<img width="1324" height="794" alt="Screenshot 2026-03-10 at 22 24 40" src="https://github.com/user-attachments/assets/09581858-b5c7-4804-a70b-12da0a500f1b" />
-
-
-### ⚠️ 10 Hz Mode
-
-Setting `set_gps_to_10hz = true` sends **proprietary u-blox binary commands** (including undocumented ones) directly to the GPS module to switch its update rate from 1 Hz to 10 Hz. This gives significantly smoother telemetry data — position, speed and heading update ten times per second instead of once.
-
-**Use at your own risk.** These commands target u-blox chipsets (e.g. the M8030-KT). Sending them to an incompatible or unknown device may cause unexpected behaviour, incorrect data output, or require a device power-cycle to recover. The feature is disabled by default (`set_gps_to_10hz = false`) and should only be enabled if you know your hardware is u-blox compatible.
-
-## Running modes
-
-| Invocation | Behaviour |
-|---|---|
-| Terminal / bench (`ssh`, local shell) | Interactive TUI rendered via `ratatui` |
-| `systemd` service / no TTY | Structured text logging to stdout |
-| `mqtt_enabled = false` | No broker needed; data shown in TUI only |
-| `mqtt_enabled = true` (default) | Data published to MQTT broker |
-
----
+# Bench test without hardware
+gps-to-mqtt --replay tests/fixtures/ublox-m8-3d-fix-1hz.nmea
+```
 
 ## Installation
 
-Pre-built packages are available for all major platforms — no Rust toolchain needed.
+Pre-built packages, no Rust toolchain needed.
 
-### Debian / Ubuntu
+**Debian / Ubuntu**
 
 ```bash
-curl -fsSL https://g86racing.com/packages/apt/gpg.key | sudo gpg --dearmor \
-     -o /usr/share/keyrings/g86racing-archive-keyring.gpg
-
-echo "deb [signed-by=/usr/share/keyrings/g86racing-archive-keyring.gpg] \
-     https://g86racing.com/packages/apt stable main" \
-  | sudo tee /etc/apt/sources.list.d/g86racing.list
-
-sudo apt update
-sudo apt install gps-to-mqtt
+curl -fsSL https://g86racing.com/packages/apt/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/g86racing-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/g86racing-archive-keyring.gpg] https://g86racing.com/packages/apt stable main" | sudo tee /etc/apt/sources.list.d/g86racing.list
+sudo apt update && sudo apt install gps-to-mqtt
 ```
 
-### Fedora / RHEL / Rocky Linux
+**Fedora / RHEL / Rocky**
 
 ```bash
 sudo tee /etc/yum.repos.d/g86racing.repo <<'EOF'
@@ -87,536 +72,239 @@ baseurl=https://g86racing.com/packages/rpm
 enabled=1
 gpgcheck=0
 EOF
-
 sudo dnf install gps-to-mqtt
 ```
 
-### macOS (Homebrew)
+**macOS (Homebrew)**
 
 ```bash
 brew tap askrejans/g86racing
 brew install gps-to-mqtt
+brew services start askrejans/g86racing/gps-to-mqtt   # optional background service
 ```
 
-To run as a background service (launchd):
+**Windows**: download the `.zip` from <https://g86racing.com/packages/windows/>,
+copy `settings.toml.example` to `settings.toml`, run
+`gps-to-mqtt.exe --config settings.toml`. To run as a service use
+[NSSM](https://nssm.cc) (`nssm install gps-to-mqtt …`).
 
-```bash
-brew services start askrejans/g86racing/gps-to-mqtt
-```
-
-Config is installed to `$(brew --prefix)/etc/gps-to-mqtt/settings.toml.example`.
-
-### Windows
-
-1. Download the latest `.zip` from [https://g86racing.com/packages/windows/](https://g86racing.com/packages/windows/).
-2. Extract and copy `settings.toml.example` → `settings.toml`, then edit it.
-3. Run interactively: `.\gps-to-mqtt.exe --config settings.toml`
-4. Install as a Windows Service (optional, using [NSSM](https://nssm.cc)):
-
-```powershell
-nssm install gps-to-mqtt "C:\gps-to-mqtt\gps-to-mqtt.exe"
-nssm set    gps-to-mqtt AppParameters "--config C:\gps-to-mqtt\settings.toml"
-nssm start  gps-to-mqtt
-```
-
-### After Linux installation
+**After a Linux package install**
 
 ```bash
 sudo cp /etc/gps-to-mqtt/settings.toml.example /etc/gps-to-mqtt/settings.toml
 sudo $EDITOR /etc/gps-to-mqtt/settings.toml
-sudo systemctl start gps-to-mqtt
+sudo systemctl restart gps-to-mqtt
+journalctl -u gps-to-mqtt -f
 ```
 
----
+Packages install the binary, a hardened systemd unit, the example config and
+the licence, and create a `gps` service user in `dialout`.
 
-## Docker
+## Sources
 
-The easiest way to run on any Linux machine or Raspberry Pi — no Rust toolchain needed.
+| `connection_type` | Use for | Key settings |
+|-------------------|---------|--------------|
+| `serial` (default) | USB dongles, UART, Raspberry Pi GNSS HATs | `port_name = "auto"` or a path, `baud_rate = 0` (auto) |
+| `tcp` | Serial-to-network bridges ([io-to-net](https://github.com/askrejans/io-to-net), ser2net, Wi-Fi GNSS modules) | `tcp_host`, `tcp_port` |
+| `udp` | Marine multiplexers, phone apps, OpenCPN | `udp_bind = "0.0.0.0:10110"` |
+| `gpsd` | Share a receiver already managed by gpsd | `tcp_host`/`tcp_port` (default `127.0.0.1:2947`) |
+| `file` | Replay recorded NMEA (tests, demos) | `replay_file`, `replay_speed`, `replay_loop` |
 
-### Quick start (serial GPS dongle)
+## Receivers
 
-```bash
-# 1 – Clone / download the repo (or just grab docker-compose.yml)
-git clone https://github.com/askrejans/gps-to-mqtt
-cd gps-to-mqtt
+Every NMEA-0183 receiver works with the default `receiver = "generic"`, which
+never writes to the device. Set a profile only to change the update rate:
 
-# 2 – Edit the environment variables in docker-compose.yml
-#     (GPS_TO_MQTT_MQTT_HOST, GPS_TO_MQTT_PORT_NAME, etc.)
-$EDITOR docker-compose.yml
+| `receiver` | Devices | What `update_rate_hz` does |
+|------------|---------|----------------------------|
+| `ublox` | u-blox 6/7/M8/M9/M10/F9 | UBX-CFG-RATE; above 1 Hz trims GLL/VTG, GSA/GSV once per second, raises the port to 115200 |
+| `mediatek` | MT33xx: GlobalTop PA6H, Adafruit Ultimate GPS, Quectel L76/L80 | PMTK220 + PMTK314 + PMTK251 |
+| `quectel` | LC29H, LC79H, LG69T | PAIR050 |
 
-# 3 – Uncomment the serial device mapping:
-#     devices:
-#       - /dev/ttyUSB0:/dev/ttyUSB0
+Settings go to receiver RAM only, and a power cycle restores the stored
+configuration. Anything else can be sent with `init_commands` (NMEA bodies
+get `$` and a checksum automatically; `hex:` sends raw bytes):
 
-# 4 – Build and start
-docker compose up -d
-
-# Follow logs
-docker compose logs -f
+```toml
+receiver       = "ublox"
+update_rate_hz = 10
+init_commands  = ["PUBX,40,GLL,0,0,0,0"]
 ```
 
-### Quick start (TCP bridge)
+## Outputs
 
-Set `GPS_TO_MQTT_CONNECTION_TYPE: tcp` and configure `GPS_TO_MQTT_TCP_HOST` / `GPS_TO_MQTT_TCP_PORT` in `docker-compose.yml`. No device mapping needed.
+### MQTT
 
-### docker-compose.yml reference
+Select any combination with `mqtt_formats`:
 
-All configuration is done via **environment variables** in `docker-compose.yml` — no config file editing required.
+| Format | Topics | Notes |
+|--------|--------|-------|
+| `legacy` | `<base>/LAT`, `/LNG`, `/MGRS`, `/MGRS_8`, `/ALT`, `/SPD`, `/SPD_KPH`, `/SPD_MPH`, `/SPD_KTS`, `/CRS`, `/SATS`, `/HDOP`, `/VDOP`, `/PDOP`, `/QTY`, `/TME`, `/DTE`, `/SAT/GLOBAL/NUM`, `/SAT/VEHICLES/<G07…>`, telemetry `/ACCEL_*`, `/COMBINED_G`, `/HEADING_RATE`, `/DISTANCE`, `/MAX_SPEED`, `/BRAKING` | One retained value per topic, published only on change |
+| `json` | `<base>/fix`, `<base>/sky` | Full fix (explicit units: `speed_mps`, `altitude_m`, `accuracy_m` + `accuracy_source`, `mgrs`, `mgrs_8`, `position_held`, `telemetry`) and satellites |
+| `g86` | `<base>/position` | G86 app external-GPS packet (schema 1), never retained, never throttled |
+| `homeassistant` | `homeassistant/device_tracker/…`, `homeassistant/sensor/…` | Discovery: location tracker plus speed, altitude, satellites, HDOP, accuracy, fix quality/mode, MGRS |
+| `owntracks` | `owntracks/gps-to-mqtt/<base>` | `_type: location` for Home Assistant, Traccar, OwnTracks Recorder |
 
-| Variable | Default | Description |
-|---|---|---|
-| `GPS_TO_MQTT_CONNECTION_TYPE` | `serial` | `serial` or `tcp` |
-| `GPS_TO_MQTT_PORT_NAME` | `/dev/ttyUSB0` | Serial device inside the container |
-| `GPS_TO_MQTT_BAUD_RATE` | `9600` | Serial baud rate |
-| `GPS_TO_MQTT_SET_GPS_TO_10HZ` | `false` | Enable 10 Hz mode (u-blox only) |
-| `GPS_TO_MQTT_TCP_HOST` | — | TCP bridge hostname / IP |
-| `GPS_TO_MQTT_TCP_PORT` | — | TCP bridge port |
-| `GPS_TO_MQTT_MQTT_ENABLED` | `true` | Set `false` for display-only |
-| `GPS_TO_MQTT_MQTT_HOST` | `localhost` | MQTT broker hostname |
-| `GPS_TO_MQTT_MQTT_PORT` | `1883` | MQTT broker port |
-| `GPS_TO_MQTT_MQTT_BASE_TOPIC` | `/CAR/GPS/` | Base MQTT topic prefix |
-| `GPS_TO_MQTT_MQTT_USERNAME` | — | Broker username (optional) |
-| `GPS_TO_MQTT_MQTT_PASSWORD` | — | Broker password (optional) |
-| `GPS_TO_MQTT_LOG_LEVEL` | `info` | `trace` \| `debug` \| `info` \| `warn` \| `error` |
-| `GPS_TO_MQTT_PROMETHEUS_ENABLED` | `false` | Enable Prometheus metrics endpoint |
-| `GPS_TO_MQTT_PROMETHEUS_PORT` | `9090` | Prometheus metrics port |
+`<base>/status` is `online`/`offline` (retained, with a last will). Use
+`mqtt_max_rate_hz` to throttle state topics on slow links. TLS: `mqtt_use_tls`,
+`mqtt_ca_file`, and `mqtt_client_cert_file` + `mqtt_client_key_file` for
+mutual TLS. Use `mqtt_password_file` for Docker/systemd secrets.
 
-### Using a settings.toml file instead
+Example `fix` document:
 
-Mount your own config file over the default:
-
-```yaml
-# docker-compose.yml
-volumes:
-  - ./settings.toml:/etc/gps-to-mqtt/settings.toml:ro
+```json
+{"sequence":1042,"time":"2026-10-20T08:40:53Z","valid":true,"mode":"3d","quality":"gps",
+ "latitude":56.9636182,"longitude":24.22893,"altitude_m":80.1,"speed_mps":0.09,
+ "satellites_used":11,"satellites_in_view":22,"hdop":1.11,"accuracy_m":5.6,
+ "accuracy_source":"hdop-estimate","mgrs":"35V LD 31524 16752","mgrs_8":"35V LD 3152 1675",
+ "position_held":false,"telemetry":{"distance_m":0.0,"max_speed_mps":3.05,"braking":false}}
 ```
 
-Environment variables always take priority over the file, so you can use both.
+### HTTP API and web dashboard
 
-### Serial port access on Linux
-
-The container user is added to the `dialout` group. Ensure your host user can also access the device:
-
-```bash
-sudo usermod -aG dialout $USER   # then log out and back in
+```toml
+http_enabled = true
+http_bind    = "127.0.0.1"   # "0.0.0.0" for the network (then set http_token)
+http_port    = 9090
+http_token   = "change-me"   # protects /api/*
 ```
 
-### Build the image yourself
+| Endpoint | |
+|----------|-|
+| `/` | Web dashboard |
+| `/health` | 200 when the source is connected and a valid fix is ≤ 5 s old, otherwise 503 (`no_fix`, `source_down`) |
+| `/metrics` | Prometheus |
+| `/api/v1/status` · `/fix` · `/sky` · `/geojson` · `/nmea` · `/config` | JSON snapshots (`/config` is masked and read-only) |
+| `/api/v1/stream` | Server-Sent Events: `fix`, `sky`, `position` |
 
-```bash
-docker build -t gps-to-mqtt .
+The dashboard has five modes (keys `1`–`5`):
+
+- **Drive**: g-g friction circle, g meters, yaw, braking, max speed, distance, compass.
+- **Navigation**: decimal/DMS/MGRS position, heights, speeds, quality, and the
+  track on a dark OpenStreetMap map (or a local-metre plot).
+- **Satellites**: sky map, signal-strength bars, DOP, satellite table.
+- **System**: link states, counters with rates, receiver messages, live NMEA monitor.
+- **Configuration**: the effective settings and wiring.
+
+It works with the token, uses a strict Content-Security-Policy, and sends no
+requests except to the bridge and the configured map tile server. Set
+`http_map_tiles = ""` for fully offline use.
+
+### Network re-broadcast
+
+```toml
+nmea_tcp_listen = "0.0.0.0:10110"          # OpenCPN, Signal K, chart plotters
+nmea_udp_target = "255.255.255.255:10110"  # broadcast to the LAN
+gpsd_listen     = "127.0.0.1:2947"         # cgps, gpsmon, Navit, libgps clients
 ```
 
----
+### Local archive
 
-## Building from source
-
-### Quick start
-
-```bash
-# 1 – Build
-cargo build --release
-
-# 2 – Copy and edit config
-cp example.settings.toml settings.toml
-$EDITOR settings.toml
-
-# 3 – Run (TUI auto-enabled when attached to a terminal)
-./target/release/gps-to-mqtt
-
-# 4 – Or pass a custom config path
-./target/release/gps-to-mqtt --config /etc/gps-to-mqtt/settings.toml
-```
-
-## CLI options
-
-```
-Usage: gps-to-mqtt [options]
-
-Options:
-  -h, --help          Print help
-  -c, --config FILE   Path to TOML config file (default: settings.toml)
-```
-
----
+`telemetry_log = "/var/lib/gps-to-mqtt/telemetry.ndjson"` appends every G86
+position packet and syncs it to disk on a dedicated writer, independent of MQTT.
+Files are created with mode 0600 and capped at 512 MiB per active file. Rotate
+by renaming (logrotate with `nocreate`, no `copytruncate`). Write failures are
+counted in `archive_errors_total` and logged at most once a minute.
 
 ## Configuration
 
-Copy `example.settings.toml` to `settings.toml` and adjust the values. Every setting can also be set via an environment variable with the `GPS_TO_MQTT_` prefix.
-
-```toml
-# ── Connection ──────────────────────────────────────────────────
-connection_type = "serial"   # "serial" | "tcp"
-
-# Serial (used when connection_type = "serial")
-port_name        = "/dev/ttyACM0"
-baud_rate        = 9600
-set_gps_to_10hz  = false     # u-blox only – use at your own risk
-
-# TCP bridge (used when connection_type = "tcp")
-# tcp_host = "192.168.1.10"
-# tcp_port = 9001
-
-# ── MQTT ────────────────────────────────────────────────────────
-mqtt_enabled    = true
-mqtt_host       = "localhost"
-mqtt_port       = 1883
-mqtt_base_topic = "/GOLF86/GPS"
-# mqtt_username = ""
-# mqtt_password = ""
-# mqtt_use_tls  = false
-
-# ── Logging ─────────────────────────────────────────────────────
-log_level = "info"    # trace | debug | info | warn | error
-log_json  = false     # true = JSON structured logs
-
-# ── Prometheus metrics ──────────────────────────────────────────
-# prometheus_enabled = false
-# prometheus_port    = 9090
-# prometheus_bind    = "0.0.0.0"
-
-# ── Racing / track mode ─────────────────────────────────────────
-# track_mode = "disabled"   # disabled | manual | learn | gpx
-```
-
-Key environment variables:
-
-| Variable | Description |
-|---|---|
-| `GPS_TO_MQTT_CONNECTION_TYPE` | `serial` or `tcp` |
-| `GPS_TO_MQTT_PORT_NAME` | Serial device path |
-| `GPS_TO_MQTT_BAUD_RATE` | Serial baud rate |
-| `GPS_TO_MQTT_TCP_HOST` / `GPS_TO_MQTT_TCP_PORT` | TCP bridge address |
-| `GPS_TO_MQTT_MQTT_ENABLED` | `true` / `false` |
-| `GPS_TO_MQTT_MQTT_HOST` / `GPS_TO_MQTT_MQTT_PORT` | Broker address |
-| `GPS_TO_MQTT_MQTT_USERNAME` / `GPS_TO_MQTT_MQTT_PASSWORD` | Broker credentials |
-| `GPS_TO_MQTT_LOG_LEVEL` | `trace` \| `debug` \| `info` \| `warn` \| `error` |
-| `GPS_TO_MQTT_PROMETHEUS_ENABLED` | `true` / `false` |
-| `GPS_TO_MQTT_PROMETHEUS_PORT` | Prometheus port |
-
-### TCP Bridge Mode
-
-Instead of a locally attached serial GPS device you can connect to a
-[io-to-net](https://github.com/askrejans/io-to-net) bridge that exposes the
-serial port over TCP.
-
-```toml
-connection_type = "tcp"
-tcp_host = "192.168.1.10"
-tcp_port = 9001
-```
-
----
-
-## MQTT Topics
-
-All topics are published under the configurable `mqtt_base_topic` prefix (default `/GOLF86/GPS`).
-Only values that have changed are republished (retained, QoS 0).
-
-### Position
-
-| Topic | Unit | Notes |
-|-------|------|-------|
-| `/LAT` | decimal degrees | Latitude |
-| `/LNG` | decimal degrees | Longitude |
-| `/ALT` | metres | Altitude above sea level |
-| `/ALT_FT` | feet | Altitude above sea level |
-
-### Speed & Course
-
-| Topic | Unit | Notes |
-|-------|------|-------|
-| `/SPD` | km/h | Speed (alias for `/SPD_KPH`) |
-| `/SPD_KPH` | km/h | Speed over ground |
-| `/SPD_MPH` | mph | Speed over ground |
-| `/SPD_KTS` | knots | Speed over ground |
-| `/CRS` | degrees | Course over ground — suppressed below 3 km/h |
-
-### Fix & Satellite Quality
-
-| Topic | Unit / Values | Notes |
-|-------|--------------|-------|
-| `/SATS` | integer | Satellites used in current fix |
-| `/SAT/GLOBAL/NUM` | integer | Total satellites tracked |
-| `/HDOP` | — | Horizontal dilution of precision |
-| `/VDOP` | — | Vertical dilution of precision |
-| `/PDOP` | — | Position dilution of precision |
-| `/QTY` | 0–8 | Fix quality: 0=Invalid, 1=GPS, 2=DGPS, 3=PPS, 4=RTK, 5=Float RTK, 6=Estimated, 7=Manual, 8=Simulation |
-| `/TME` | HH:MM:SS | GPS UTC time |
-| `/DTE` | DD.MM.YYYY | GPS UTC date |
-| `/POSITION_ACCURACY` | metres | 2D position accuracy (from GST) |
-| `/TRUE_HEADING` | degrees | True heading (from HDT) |
-| `/HEADING_RATE_GPS` | deg/s | Heading rate from GPS ROT sentence |
-
-### Per-Satellite
-
-| Topic | Format | Notes |
-|-------|--------|-------|
-| `/SAT/VEHICLES/{prn}` | text | `PRN: N, Type: X, Elevation: N, Azimuth: N, SNR: N, In View: true/false` |
-
-### Telemetry  *(requires `telemetry_enabled = true`)*
-
-| Topic | Unit | Notes |
-|-------|------|-------|
-| `/ACCEL_LONG_MPS2` | m/s² | Longitudinal acceleration |
-| `/ACCEL_LONG_G` | g | Longitudinal acceleration |
-| `/ACCEL_LAT_MPS2` | m/s² | Lateral (centripetal) acceleration |
-| `/ACCEL_LAT_G` | g | Lateral acceleration |
-| `/COMBINED_G` | g | √(long_g² + lat_g²) total g-load |
-| `/HEADING_RATE` | deg/s | Yaw rate (ROT preferred, course-diff fallback) |
-| `/DISTANCE` | metres | Cumulative distance this session |
-| `/MAX_SPEED` | km/h | Session maximum speed |
-| `/MAX_SPEED_MPH` | mph | Session maximum speed |
-| `/BRAKING` | 0 / 1 | 1 when deceleration < −0.5 m/s² |
-
-### Lap Timing  *(requires track mode enabled)*
-
-| Topic | Unit | Notes |
-|-------|------|-------|
-| `/LAP_NUMBER` | integer | Current lap counter |
-| `/LAP_TIME` | seconds | Last completed lap time |
-| `/BEST_LAP` | seconds | Best lap time this session |
-| `/SECTOR_1`, `/SECTOR_2`, … | seconds | Individual sector times |
-
----
-
-## Prometheus Metrics
-
-Enable a lightweight HTTP server that exposes a Prometheus scrape endpoint and a JSON health check:
-
-```toml
-prometheus_enabled = true
-prometheus_port    = 9090
-prometheus_bind    = "0.0.0.0"
-```
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /metrics` | Prometheus text format (scrape target) |
-| `GET /health` | JSON health summary |
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `gps_nmea_sentences_total` | counter | Total NMEA sentences received |
-| `gps_connected` | gauge | 1 if GPS source is connected |
-| `gps_fix_quality` | gauge | Fix quality (0=invalid, 1=GPS, 2=DGPS, 4=RTK…) |
-| `gps_satellites_used` | gauge | Satellites used in current fix |
-| `gps_satellites_in_view` | gauge | Total tracked satellites |
-| `gps_hdop` | gauge | Horizontal dilution of precision |
-| `gps_speed_kmh` | gauge | Current speed in km/h |
-| `gps_altitude_meters` | gauge | Altitude above sea level (m) |
-| `gps_position_accuracy_meters` | gauge | 2D position accuracy (m, from GST) |
-| `mqtt_connected` | gauge | 1 if MQTT broker is connected |
-| `mqtt_messages_published_total` | counter | Total MQTT messages published |
-
----
-
-## Building packages
-
-The `scripts/build_packages.sh` script cross-compiles for **all platforms**.
-
-### Targets
-
-| Platform | Arch   | Rust triple                     | Output      |
-|----------|--------|---------------------------------|-------------|
-| Linux    | x64    | x86_64-unknown-linux-gnu        | .deb + .rpm |
-| Linux    | arm64  | aarch64-unknown-linux-gnu       | .deb + .rpm |
-| Windows  | x64    | x86_64-pc-windows-gnu           | .zip        |
-| macOS    | x64    | x86_64-apple-darwin             | .tar.gz     |
-| macOS    | arm64  | aarch64-apple-darwin            | .tar.gz     |
-
-### Mac prerequisites
+All settings are flat keys in `settings.toml` and can be overridden with
+`GPS_TO_MQTT_<KEY>` environment variables (or a `.env` file):
 
 ```bash
-# Rust toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# cross – Docker-based cross-compiler for Linux + Windows targets
-cargo install cross
-# Docker Desktop must be running (and Rosetta enabled for Apple Silicon)
-
-# macOS SDK (already present if Xcode CLT is installed)
-xcode-select --install
-
-# macOS cross-arch targets (native cargo, no Docker needed)
-rustup target add x86_64-apple-darwin aarch64-apple-darwin
-
-# Apple Silicon: pre-install cross-compilation toolchains needed inside Docker
-for TRIPLE in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-gnu; do
-    rustup toolchain install stable-$TRIPLE --force-non-host --profile minimal
-done
-
-# DEB packaging tool
-brew install dpkg
-
-# RPM packaging tool
-brew install rpm
+GPS_TO_MQTT_MQTT_HOST=broker.lan GPS_TO_MQTT_MQTT_FORMATS=legacy,homeassistant gps-to-mqtt
 ```
 
-### Build commands
+Config files are searched in `/etc/gps-to-mqtt/settings.toml`, next to the
+binary, and in the working directory, or given with `-c`. Every key is
+documented in [example.settings.toml](example.settings.toml).
+
+| Area | Keys |
+|------|------|
+| Source | `connection_type`, `port_name`, `baud_rate`, `tcp_host`, `tcp_port`, `udp_bind`, `replay_*`, `nmea_require_checksum` |
+| Receiver | `receiver`, `update_rate_hz`, `init_commands` |
+| MQTT | `mqtt_enabled`, `mqtt_host`, `mqtt_port`, `mqtt_base_topic`, `mqtt_formats`, `mqtt_qos`, `mqtt_retain`, `mqtt_max_rate_hz`, `mqtt_username`, `mqtt_password(_file)`, `mqtt_use_tls`, `mqtt_ca_file`, `mqtt_client_*_file` |
+| HTTP | `http_enabled`, `http_bind`, `http_port`, `http_token`, `http_cors_origin`, `http_ui`, `http_map_tiles`, `http_map_dark` |
+| Network | `nmea_tcp_listen`, `nmea_udp_target`, `gpsd_listen`, `max_clients` |
+| Processing | `telemetry_enabled`, `telemetry_smoothing_window`, `static_hold`, `static_hold_speed_kph`, `static_hold_radius_m`, `satellite_timeout_s`, `telemetry_log` |
+| Logging | `log_level`, `log_json`, `tui_refresh_rate_ms`, `max_log_buffer_size` |
+
+Upgrading from 0.6: `prometheus_*` and `set_gps_to_10hz` are still accepted;
+lap timing was removed. Note that environment variables now actually apply
+(0.6 silently ignored multi-word variables). See [TECHNICAL.md](TECHNICAL.md#8-migrating-from-06).
+
+## Docker
 
 ```bash
-# Everything – all platforms, all arches, all package types
-./scripts/build_packages.sh
-
-# Linux only (DEB + RPM, all arches)
-./scripts/build_packages.sh --platform linux
-
-# Single format / arch
-./scripts/build_packages.sh --platform linux  --arch arm64 --type deb
-./scripts/build_packages.sh --platform windows --arch x64
-./scripts/build_packages.sh --platform mac     --arch arm64
-
-# Use local cargo instead of cross (you must have all toolchains installed)
-./scripts/build_packages.sh --no-cross
-
-./scripts/build_packages.sh --help
+docker compose up -d        # edit environment in docker-compose.yml first
+docker compose logs -f
 ```
 
-Output layout:
+The image runs as a non-root user with a read-only root filesystem in the
+compose example. Map the receiver with `devices:` (prefer
+`/dev/serial/by-id/…`). `HEALTHCHECK` uses `gps-to-mqtt --healthcheck`.
+Build it yourself with `docker build -t gps-to-mqtt .`.
+
+## Running modes
+
+| Invocation | Behaviour |
+|------------|-----------|
+| Terminal | Interactive dashboard: overview, satellites + sky view, stats, logs, raw NMEA (`1`–`5`, `p` pause, `q` quit) |
+| systemd / Docker / pipe, or `--headless` | Structured logs (`log_json = true` for JSON) |
+| `mqtt_enabled = false` | Display/API only, no broker needed |
+
+## CLI
 
 ```
-release/<version>/
-  linux/
-    deb/   *.deb (amd64, arm64)
-    rpm/   *.rpm (x86_64, aarch64)
-  windows/
-         *.zip (x64)
-  mac/
-         *.tar.gz (x86_64, arm64)
-         sha256sums.txt
+gps-to-mqtt [OPTIONS]
+  -c, --config <FILE>   Config file
+      --check-config    Validate, print effective settings (secrets masked), exit
+      --list-ports      List serial ports ranked by GNSS likelihood
+      --probe           With --list-ports: probe each port for NMEA
+      --replay <FILE>   Replay an NMEA log
+      --headless        Never start the terminal dashboard
+      --healthcheck     Exit 0 if /health is OK (container probes)
+  -V, --version / -h, --help
 ```
-
-Each Linux package:
-- Installs the binary to `/usr/bin/gps-to-mqtt`
-- Installs the systemd unit to `/lib/systemd/system/gps-to-mqtt.service`
-- Drops an example config at `/etc/gps-to-mqtt/settings.toml.example`
-- Creates a `gps` system user (in `dialout` group for serial GPS access)
-- Enables the service on install
-
----
-
-## Architecture
-
-The application uses a modern async architecture built on tokio:
-
-```
-Serial Port Task (blocking)  ┐
-  OR                         ├─→ GPS Parser → Event Channel
-TCP Bridge Task (async)      ┘                     ↓
-                                          State Aggregator
-                                                   ↓
-                                             Shared State ← TUI/CLI/Service
-                                                   ↓
-                                            MQTT Publisher
-```
-
-### Key components
-
-- `src/config.rs` – configuration loading (TOML + env vars)
-- `src/parser.rs` – NMEA sentence parser
-- `src/telemetry.rs` – racing telemetry calculations
-- `src/track.rs` – lap timing and track management
-- `src/mqtt.rs` – async MQTT client with reconnection
-- `src/serial.rs` – serial port handler with reconnection
-- `src/tcp.rs` – async TCP bridge handler with reconnection
-- `src/metrics.rs` – Prometheus metrics exposition
-- `src/models.rs` – GPS and telemetry data structures
-- `src/ui/` – ratatui TUI with multiple tabs
-- `src/service.rs` – signal handling for graceful shutdown
-- `src/logging.rs` – mode-specific logging configuration
-
----
 
 ## Troubleshooting
 
-### Serial port access
+| Symptom | Check |
+|---------|-------|
+| `no NMEA receiver found` | `gps-to-mqtt --list-ports --probe`; Linux permissions: `sudo usermod -aG dialout $USER` and log in again |
+| Fixes slower than configured | Set `receiver` to the right profile; over TCP the bridge's serial port must run at ≥ 115200 for 5–10 Hz |
+| `/health` returns 503 `no_fix` | No sky view (indoors) or the receiver is still starting; see the Satellites mode |
+| MQTT messages dropped | `mqtt_messages_dropped_total` rises while the broker is down; the state is re-sent on reconnect |
+| Nothing on MQTT | `mosquitto_sub -h <broker> -t '<base>/#' -v`; `log_level = "debug"` |
+| Garbled terminal dashboard | UTF-8 terminal, at least 100×30 |
+
+## Building packages
+
+`scripts/build_packages.sh` cross-compiles DEB/RPM (x64, arm64), Windows ZIP
+and macOS tarballs (`--platform`, `--arch`, `--type`, `--no-cross`; see
+`--help`). It needs `cross` + Docker for Linux/Windows targets, `dpkg` and
+`rpm` from Homebrew, and the macOS rustup targets. Output goes to
+`release/<version>/`.
+
+## Development
 
 ```bash
-sudo usermod -a -G dialout $USER
-# Log out and back in for changes to take effect
+cargo test                                   # unit, integration and real-receiver fixture tests
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+cargo audit                                  # policy in .cargo/audit.toml
 ```
 
-### MQTT connection issues
-
-```bash
-mosquitto_sub -h localhost -t '#' -v
-```
-
-Enable debug logging: set `log_level = "debug"` in `settings.toml` or `GPS_TO_MQTT_LOG_LEVEL=debug`.
-
-### TUI display issues
-
-Ensure your terminal supports UTF-8 and has at least 80×24 characters.
-
----
+Architecture, output contracts, receiver measurements and the security model
+are documented in [TECHNICAL.md](TECHNICAL.md). AI-assisted development
+guidance lives in [AGENTS.md](AGENTS.md) and [skills/](skills/).
 
 ## Related projects
 
-- [Speeduino-to-MQTT](https://github.com/askrejans/speeduino-to-mqtt) – companion ECU data bridge
-- [io-to-net](https://github.com/askrejans/io-to-net) – TCP bridge for serial GPS over network
-- [G86 Web Dashboard](https://github.com/askrejans/G86-web-dashboard) – web dashboard for MQTT telemetry data
-
----
+- [io-to-net](https://github.com/askrejans/io-to-net): serial-to-TCP bridge
+- [Speeduino-to-MQTT](https://github.com/askrejans/speeduino-to-mqtt): ECU data bridge
+- [G86 Web Dashboard](https://github.com/askrejans/G86-web-dashboard): MQTT telemetry dashboard
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-
-## Local canonical archive (0.6.0)
-
-Set `telemetry_log` to an absolute NDJSON filename. Under the packaged systemd
-service, use `/var/lib/gps-to-mqtt/telemetry.ndjson`; its private `StateDirectory`
-permits writes with the otherwise read-only service filesystem.
-
-Each decoded canonical packet is appended and its file data synchronized before
-live forwarding. The archive continues with MQTT disabled or unavailable. An
-active file is capped at 512 MiB. A write/capacity failure logs an error at most
-once per minute while live processing continues. Monitor the service journal and
-free storage; a failing archive is not silently represented as a successful save.
-Use reliable power/storage. A crash can leave the last line incomplete.
-
-Rotate by renaming, not `copytruncate`. The writer opens the path for each
-append, so the next packet creates a new private file. For example:
-
-```text
-/var/lib/gps-to-mqtt/telemetry.ndjson {
-    daily
-    maxsize 64M
-    rotate 8
-    missingok
-    notifempty
-    compress
-    delaycompress
-    nocreate
-}
-```
-
-Run logrotate at least hourly if using `maxsize`. Rotation removes the oldest
-files after eight archives. Active-file caps are separate from total retention;
-check disk space and export evidence before rotation removes it. The raw archive
-is an independent capture file. It does not automatically create or upload G86
-sessions; record on the connected phone for timed sessions and cloud review.
-
-## G86 external GPS packet (0.6.0)
-
-The non-retained `<mqtt_base_topic>/position` topic carries a coherent JSON fix:
-`schema: 1`, `source: "nmea"`, `bootId`, `sequence`, `timestampMs` (UTC),
-`latitude`, `longitude`, `speedMps`, `headingDeg`, `accuracyM`, `altitudeM` and
-`accuracySource: "hdop-estimate"`. RMC must be valid, GGA quality must be 1–5,
-checksums must match and both sentences must agree on time and position.
-Fractional NMEA timestamps are preserved. Estimated/dead-reckoned/simulated
-receiver modes are rejected. HDOP × 5 m (minimum 3 m) is a labelled estimate,
-not receiver-reported or survey-certified horizontal accuracy.
-
-In G86 build 39+, select External GPS over MQTT in Settings → GPS & Recording,
-then set the exact position topic. Use the same broker in Connection. This works
-with ECU type None. G86 requires Pro for external data, ignores retained frames,
-requires monotonic capture time/sequence and rejects fixes older than two seconds
-or more than 500 ms ahead of the phone. It does not silently fall back to phone
-GPS during an outage. The phone and receiver need synchronized clocks.
-
-The decoder and a real Rust → Mosquitto → Flutter integration test cover coherent
-fixes, duplicate/stale/retained rejection, optional ECU attachment, Pro revocation
-and archive capture while the broker is down. No physical receiver validation
-or iPhone background-runtime guarantee is implied by these synthetic checks.
+GPL-3.0-only. See [LICENSE](LICENSE).

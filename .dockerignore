@@ -1,0 +1,5 @@
+target/
+release/
+.git/
+.DS_Store
+*.ndjson
