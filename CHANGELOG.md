@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.2
+
+### Changed
+- On-demand answers (`<base>/position/get`) now carry a sample the display hasn't
+  had yet: a request that arrives when there is nothing new is held until the
+  next sample (at most 2 s) and answered then. A display keeping several
+  requests in flight gets every new sample once, as soon as it exists, and
+  never a duplicate, which spared airtime is what keeps weak links smooth.
+- The per-display limit is a token bucket (bursts of 12, 100 answers a second
+  on average) instead of a 10 ms gap: requests that Wi-Fi delivered in a burst
+  were dropped, and the display stalled until it timed them out.
+
 ## 0.7.1
 
 ### Added

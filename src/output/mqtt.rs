@@ -386,15 +386,117 @@ fn sanitize(s: &str) -> String {
 
 // ── Runtime ──────────────────────────────────────────────────────────────
 
-const DEMAND_MIN_INTERVAL: Duration = Duration::from_millis(10);
+/// Per reply topic: bursts of up to DEMAND_BURST requests are answered at
+/// once (a display keeps several in flight, and Wi-Fi delivers them in bursts),
+/// at most DEMAND_RATE per second on average.
+const DEMAND_BURST: f32 = 12.0;
+const DEMAND_RATE: f32 = 100.0;
+/// A request waits at most this long for a new sample.
+const DEMAND_HOLD: Duration = Duration::from_secs(2);
 const DEMAND_MAX_CLIENTS: usize = 32;
 const DEMAND_MAX_AGE_S: f64 = 2.0;
+
+/// Token bucket for on-demand answers to one reply topic.
+#[derive(Debug, Clone, Copy)]
+pub struct DemandBucket {
+    tokens: f32,
+    at: Instant,
+}
+
+impl DemandBucket {
+    pub fn new(now: Instant) -> Self {
+        DemandBucket {
+            tokens: DEMAND_BURST,
+            at: now,
+        }
+    }
+
+    /// One answer if the bucket has a token; refills at DEMAND_RATE per second.
+    pub fn take(&mut self, now: Instant) -> bool {
+        let dt = now.saturating_duration_since(self.at).as_secs_f32();
+        self.tokens = (self.tokens + dt * DEMAND_RATE).min(DEMAND_BURST);
+        self.at = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// One display asking on demand: its rate bucket and the requests it holds
+/// open. A request is answered with the next sample it hasn't had yet, so
+/// a display gets every new sample once, as soon as it exists, and never a
+/// duplicate (that would only cost airtime on a weak link).
+#[derive(Debug, Clone, Copy)]
+pub struct DemandClient {
+    bucket: DemandBucket,
+    pending: u8,
+    last_seq: Option<u64>,
+    since: Instant,
+}
+
+impl DemandClient {
+    pub fn new(now: Instant) -> Self {
+        DemandClient {
+            bucket: DemandBucket::new(now),
+            pending: 0,
+            last_seq: None,
+            since: now,
+        }
+    }
+
+    /// A request arrived; false if over the rate (dropped).
+    pub fn request(&mut self, now: Instant) -> bool {
+        if !self.bucket.take(now) {
+            return false;
+        }
+        self.pending = (self.pending + 1).min(DEMAND_BURST as u8);
+        self.since = now;
+        true
+    }
+
+    /// Whether to answer one held request now with sample `seq` (None: no
+    /// fresh sample). Held requests expire after DEMAND_HOLD.
+    pub fn ready(&mut self, seq: Option<u64>, now: Instant) -> bool {
+        if self.pending == 0 {
+            return false;
+        }
+        if now.saturating_duration_since(self.since) > DEMAND_HOLD {
+            self.pending = 0;
+            return false;
+        }
+        match seq {
+            Some(s) if self.last_seq != Some(s) => {
+                self.last_seq = Some(s);
+                self.pending -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn last_seen(&self) -> Instant {
+        self.since
+    }
+}
 
 /// A usable reply topic: 1–128 bytes of UTF-8, no wildcards, not a `$` system topic.
 pub fn valid_reply_topic(payload: &[u8]) -> Option<&str> {
     let t = std::str::from_utf8(payload).ok()?.trim();
     (!t.is_empty() && t.len() <= 128 && !t.contains(['+', '#', '\0']) && !t.starts_with('$'))
         .then_some(t)
+}
+
+/// The fix an on-demand answer would carry now, or None (no fresh valid fix).
+pub fn demand_sequence(shared: &Shared) -> Option<u64> {
+    let s = shared.read();
+    if s.fix_age_s(Instant::now())? > DEMAND_MAX_AGE_S {
+        return None;
+    }
+    let fix = s.fix.as_ref()?;
+    (fix.valid && fix.latitude.is_some() && fix.longitude.is_some()).then_some(fix.sequence)
 }
 
 /// The latest valid fix for an on-demand request; `None` when there is none.
@@ -463,7 +565,10 @@ pub async fn run(config: AppConfig, shared: Arc<Shared>, cancel: CancellationTok
     );
     let max_attempts = config.mqtt_reconnect_max_attempts;
     let event_loop = tokio::spawn(async move {
-        let mut answered: HashMap<String, Instant> = HashMap::new();
+        let mut answered: HashMap<String, DemandClient> = HashMap::new();
+        // releases held requests when a new sample exists
+        let mut tick = tokio::time::interval(Duration::from_millis(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut delay = Duration::from_secs(1);
         let mut failures = 0u32;
         let mut generation = 0u64;
@@ -471,6 +576,21 @@ pub async fn run(config: AppConfig, shared: Arc<Shared>, cancel: CancellationTok
         loop {
             let polled = tokio::select! {
                 r = eventloop.poll() => r,
+                _ = tick.tick(), if answered.values().any(|c| c.pending > 0) => {
+                    let now = Instant::now();
+                    let seq = demand_sequence(&el_shared);
+                    for (reply, c) in answered.iter_mut() {
+                        if c.ready(seq, now)
+                            && let Some(doc) = demand_reply(&el_shared)
+                        {
+                            match el_client.try_publish(reply.clone(), QoS::AtMostOnce, false, doc) {
+                                Ok(()) => Counters::inc(&el_shared.counters.mqtt_published),
+                                Err(_) => Counters::inc(&el_shared.counters.mqtt_dropped),
+                            }
+                        }
+                    }
+                    continue;
+                }
                 _ = el_cancel.cancelled() => {
                     // Give the offline status + DISCONNECT a moment to flush.
                     let _ = tokio::time::timeout(Duration::from_secs(1), async {
@@ -494,20 +614,24 @@ pub async fn run(config: AppConfig, shared: Arc<Shared>, cancel: CancellationTok
                         continue;
                     };
                     let now = Instant::now();
-                    if answered
-                        .get(reply)
-                        .is_some_and(|t| now.duration_since(*t) < DEMAND_MIN_INTERVAL)
-                    {
-                        continue;
-                    }
                     if answered.len() >= DEMAND_MAX_CLIENTS && !answered.contains_key(reply) {
-                        answered.retain(|_, t| now.duration_since(*t) < Duration::from_secs(10));
+                        answered.retain(|_, c| {
+                            now.duration_since(c.last_seen()) < Duration::from_secs(10)
+                        });
                         if answered.len() >= DEMAND_MAX_CLIENTS {
                             continue;
                         }
                     }
-                    answered.insert(reply.to_string(), now);
-                    if let Some(doc) = demand_reply(&el_shared) {
+                    let c = answered
+                        .entry(reply.to_string())
+                        .or_insert_with(|| DemandClient::new(now));
+                    if !c.request(now) {
+                        continue;
+                    }
+                    // answered at once if there is a sample it hasn't had, else held for the next one
+                    if c.ready(demand_sequence(&el_shared), now)
+                        && let Some(doc) = demand_reply(&el_shared)
+                    {
                         match el_client.try_publish(reply, QoS::AtMostOnce, false, doc) {
                             Ok(()) => Counters::inc(&el_shared.counters.mqtt_published),
                             Err(_) => Counters::inc(&el_shared.counters.mqtt_dropped),
@@ -794,6 +918,56 @@ mod tests {
             }),
             ..Fix::default()
         }
+    }
+
+    #[test]
+    fn demand_client_answers_each_sample_once() {
+        let t0 = Instant::now();
+        let mut c = DemandClient::new(t0);
+        for _ in 0..3 {
+            assert!(c.request(t0));
+        }
+        assert!(c.ready(Some(1), t0), "a sample it hasn't had: at once");
+        assert!(!c.ready(Some(1), t0), "the same sample again: held");
+        assert!(!c.ready(None, t0), "no fresh data: held");
+        assert!(
+            c.ready(Some(2), t0 + Duration::from_millis(20)),
+            "the next sample releases one"
+        );
+        assert!(c.ready(Some(3), t0 + Duration::from_millis(40)));
+        assert!(
+            !c.ready(Some(4), t0 + Duration::from_millis(60)),
+            "all three answered"
+        );
+        // held requests expire
+        assert!(c.request(t0 + Duration::from_millis(100)));
+        assert!(!c.ready(
+            Some(4),
+            t0 + Duration::from_millis(100) + DEMAND_HOLD + Duration::from_millis(1)
+        ));
+        assert!(!c.ready(Some(5), t0 + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn demand_bucket_allows_bursts_and_caps_the_rate() {
+        let t0 = Instant::now();
+        let mut b = DemandBucket::new(t0);
+        // a burst of in-flight requests arriving together is answered in full
+        for _ in 0..12 {
+            assert!(b.take(t0));
+        }
+        assert!(!b.take(t0), "beyond the burst");
+        // refills at 100 per second: one more after 10 ms
+        assert!(b.take(t0 + Duration::from_millis(10)));
+        assert!(!b.take(t0 + Duration::from_millis(11)));
+        // a second of requests every millisecond: about 100 answered
+        let mut n = 0;
+        for ms in 0..1000u64 {
+            if b.take(t0 + Duration::from_millis(20 + ms)) {
+                n += 1;
+            }
+        }
+        assert!((95..=110).contains(&n), "{n} answered");
     }
 
     #[test]

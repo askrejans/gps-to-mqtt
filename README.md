@@ -155,8 +155,12 @@ not retained; no answer without one):
 `gpsSpeedKmh`, `altitudeM`, `accuracyM`, `satellitesUsed`, `satellitesInView`,
 `hdop`, `vdop`, `pdop`, `rateOfTurnDps`, `combinedG`, `yawRateDps`,
 `distanceM`, `maxSpeedKmh`. Missing values are left out. The consumer asks
-again after using the answer, so no backlog builds up. Answers are rate
-limited to one per 10 ms per reply topic, for up to 32 reply topics.
+again after using the answer, so no backlog builds up. Each request is answered with a sample the consumer hasn't had yet: when
+there is nothing new, the request is held until the next sample (at most
+2 s). A consumer can keep several requests in flight (the G86 displays keep
+10) and gets every new sample once, as soon as it exists, without duplicates.
+Per reply topic, answers are limited by a token bucket (bursts of 12, 100 a
+second on average), for up to 32 reply topics.
 
 `<base>/status` is `online`/`offline` (retained, with a last will). Use
 `mqtt_max_rate_hz` to throttle state topics on slow links. TLS: `mqtt_use_tls`,
