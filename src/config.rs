@@ -112,8 +112,13 @@ pub struct AppConfig {
     pub mqtt_port: u16,
     /// Client ID; auto-generated (unique per process) when unset.
     pub mqtt_client_id: Option<String>,
-    #[serde(default = "default_mqtt_base_topic")]
-    pub mqtt_base_topic: String,
+    /// Explicit base topic. Unset: `/g86/<car>/gps` when `car` is set, else
+    /// the legacy `/GOLF86/GPS`.
+    #[serde(default)]
+    pub mqtt_base_topic: Option<String>,
+    /// Car slug (`golf86`): selects the G86 car-computer namespace `/g86/<car>/gps`.
+    #[serde(default)]
+    pub car: Option<String>,
     /// `0` = retry forever.
     #[serde(default)]
     pub mqtt_reconnect_max_attempts: u32,
@@ -245,8 +250,17 @@ fn default_mqtt_host() -> String {
 fn default_mqtt_port() -> u16 {
     1883
 }
-fn default_mqtt_base_topic() -> String {
-    "/GOLF86/GPS".into()
+/// Base topic when neither `mqtt_base_topic` nor `car` is set (unchanged since 0.5).
+pub const LEGACY_BASE_TOPIC: &str = "/GOLF86/GPS";
+
+/// G86 car slug: `^[a-z0-9][a-z0-9-]{0,31}$`.
+pub fn valid_car(car: &str) -> bool {
+    let b = car.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 fn default_keep_alive() -> u64 {
     30
@@ -394,11 +408,13 @@ impl AppConfig {
             if self.mqtt_port == 0 {
                 bail!("mqtt_port must be > 0");
             }
-            if self.mqtt_base_topic.trim_matches('/').is_empty() {
-                bail!("mqtt_base_topic must not be empty");
-            }
-            if self.mqtt_base_topic.contains(['#', '+']) {
-                bail!("mqtt_base_topic must not contain MQTT wildcards");
+            if let Some(base) = &self.mqtt_base_topic {
+                if base.trim_matches('/').is_empty() {
+                    bail!("mqtt_base_topic must not be empty");
+                }
+                if base.contains(['#', '+']) {
+                    bail!("mqtt_base_topic must not contain MQTT wildcards");
+                }
             }
             if self.mqtt_qos > 1 {
                 bail!("mqtt_qos must be 0 or 1");
@@ -417,6 +433,13 @@ impl AppConfig {
             if self.mqtt_owntracks_tid.len() > 2 {
                 bail!("mqtt_owntracks_tid must be at most 2 characters");
             }
+        }
+        if let Some(car) = &self.car
+            && !valid_car(car)
+        {
+            bail!(
+                "car must match ^[a-z0-9][a-z0-9-]{{0,31}}$ (lower-case letters, digits, hyphens)"
+            );
         }
         let levels = ["trace", "debug", "info", "warn", "error"];
         if !levels.contains(&self.log_level.to_lowercase().as_str()) {
@@ -489,9 +512,23 @@ impl AppConfig {
         self.update_rate_hz.or(self.set_gps_to_10hz.then_some(10))
     }
 
-    /// Base topic without trailing slash (`/CAR/GPS/` → `/CAR/GPS`).
-    pub fn base_topic(&self) -> &str {
-        self.mqtt_base_topic.trim_end_matches('/')
+    /// Resolved base topic without trailing slash (`/CAR/GPS/` → `/CAR/GPS`):
+    /// explicit `mqtt_base_topic`, else `/g86/<car>/gps`, else the legacy default.
+    pub fn base_topic(&self) -> String {
+        match (&self.mqtt_base_topic, &self.car) {
+            (Some(base), _) => base.trim_end_matches('/').to_string(),
+            (None, Some(car)) => format!("/g86/{car}/gps"),
+            (None, None) => LEGACY_BASE_TOPIC.to_string(),
+        }
+    }
+
+    /// Where the base topic came from, for the startup log.
+    pub fn base_topic_origin(&self) -> &'static str {
+        match (&self.mqtt_base_topic, &self.car) {
+            (Some(_), _) => "mqtt_base_topic",
+            (None, Some(_)) => "car",
+            (None, None) => "legacy default",
+        }
     }
 
     pub fn wants(&self, format: MqttFormat) -> bool {
@@ -754,8 +791,8 @@ mod tests {
             Box::new(|c| c.port_name.clear()),
             Box::new(|c| c.mqtt_host.clear()),
             Box::new(|c| c.mqtt_port = 0),
-            Box::new(|c| c.mqtt_base_topic = "/".into()),
-            Box::new(|c| c.mqtt_base_topic = "a/#".into()),
+            Box::new(|c| c.mqtt_base_topic = Some("/".into())),
+            Box::new(|c| c.mqtt_base_topic = Some("a/#".into())),
             Box::new(|c| c.mqtt_qos = 2),
             Box::new(|c| c.mqtt_formats.clear()),
             Box::new(|c| c.mqtt_client_cert_file = Some("c.pem".into())),
@@ -778,6 +815,10 @@ mod tests {
             }),
             Box::new(|c| c.nmea_tcp_listen = Some("10110".into())),
             Box::new(|c| c.init_commands = vec!["hex:zz".into()]),
+            Box::new(|c| c.car = Some("Golf86".into())),
+            Box::new(|c| c.car = Some("golf/86".into())),
+            Box::new(|c| c.car = Some("-golf".into())),
+            Box::new(|c| c.car = Some("a".repeat(33))),
         ];
         for (i, mutate) in cases.iter().enumerate() {
             let mut c = AppConfig::default();
@@ -803,12 +844,35 @@ mod tests {
     #[test]
     fn helpers() {
         let mut c = AppConfig::default();
-        c.mqtt_base_topic = "/CAR/GPS/".into();
+        c.mqtt_base_topic = Some("/CAR/GPS/".into());
         assert_eq!(c.base_topic(), "/CAR/GPS");
         assert_eq!(c.mqtt_address(), "localhost:1883");
         assert_eq!(c.connection_display(), "auto @ auto baud");
         c.connection_type = ConnectionType::Gpsd;
         assert_eq!(c.connection_display(), "gpsd 127.0.0.1:2947");
+    }
+
+    #[test]
+    fn base_topic_explicit_then_car_then_legacy() {
+        // Existing installs (nothing set) keep the legacy topic.
+        let f = toml("");
+        let c = build(Some(f.path()), env(&[])).unwrap();
+        assert_eq!(c.base_topic(), "/GOLF86/GPS");
+        assert_eq!(c.base_topic_origin(), "legacy default");
+        // `car` selects the G86 namespace, from the file or the environment.
+        let f = toml(r#"car = "qa-car""#);
+        let c = build(Some(f.path()), env(&[])).unwrap();
+        assert_eq!(c.base_topic(), "/g86/qa-car/gps");
+        let c = build(Some(f.path()), env(&[("GPS_TO_MQTT_CAR", "golf86")])).unwrap();
+        assert_eq!(c.base_topic(), "/g86/golf86/gps");
+        let c = build(Some(f.path()), env(&[("GPS_TO_MQTT_CAR", "86")])).unwrap();
+        assert_eq!(c.base_topic(), "/g86/86/gps");
+        // An explicit base topic always wins.
+        let f = toml("car = \"qa-car\"\nmqtt_base_topic = \"/CAR/GPS/\"");
+        let c = build(Some(f.path()), env(&[])).unwrap();
+        assert_eq!(c.base_topic(), "/CAR/GPS");
+        assert_eq!(c.base_topic_origin(), "mqtt_base_topic");
+        assert!(build(Some(f.path()), env(&[("GPS_TO_MQTT_CAR", "Bad Car")])).is_err());
     }
 
     #[test]
