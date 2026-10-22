@@ -2,6 +2,14 @@
 use crate::nmea::fields::{parse_coordinate, parse_date, parse_time};
 use chrono::{NaiveTime, Utc};
 use serde::Serialize;
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+/// Per-process boot ID: on every position packet and on `<base>/health`.
+pub fn boot_id() -> &'static str {
+    static BOOT: OnceLock<String> = OnceLock::new();
+    BOOT.get_or_init(|| format!("{}-{}", std::process::id(), Utc::now().timestamp_micros()))
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,20 +26,25 @@ struct Position {
     accuracy_m: f64,
     altitude_m: f64,
     accuracy_source: &'static str,
+    /// Registry channels (`contracts/channels.yaml`, source `gps`) of this fix.
+    channels: BTreeMap<&'static str, serde_json::Value>,
 }
+
+/// GGA quality part: time, accuracy, altitude, latitude, longitude, HDOP, satellites used.
+type Gga = (NaiveTime, f64, f64, f64, f64, f64, Option<u32>);
 
 pub struct PositionEncoder {
     boot: String,
     sequence: u64,
     rmc: Option<(NaiveTime, Position)>,
-    gga: Option<(NaiveTime, f64, f64, f64, f64)>,
+    gga: Option<Gga>,
     last_timestamp: i64,
 }
 
 impl PositionEncoder {
     pub fn new() -> Self {
         Self {
-            boot: format!("{}-{}", std::process::id(), Utc::now().timestamp_micros()),
+            boot: boot_id().to_string(),
             sequence: 0,
             rmc: None,
             gga: None,
@@ -108,6 +121,7 @@ impl PositionEncoder {
                         accuracy_m: 0.0,
                         altitude_m: 0.0,
                         accuracy_source: "hdop-estimate",
+                        channels: BTreeMap::new(),
                     },
                 ));
             }
@@ -131,12 +145,21 @@ impl PositionEncoder {
                 }
                 // HDOP is dimensionless. A conservative 5 m UERE is an estimate,
                 // not a claim of receiver-reported horizontal accuracy.
-                self.gga = Some((time, (hdop * 5.0).max(3.0), altitude, latitude, longitude));
+                let satellites = p[7].parse::<u32>().ok().filter(|n| *n <= 64);
+                self.gga = Some((
+                    time,
+                    (hdop * 5.0).max(3.0),
+                    altitude,
+                    latitude,
+                    longitude,
+                    hdop,
+                    satellites,
+                ));
             }
             _ => return None,
         }
         let (time, position) = self.rmc.as_ref()?;
-        let (quality_time, accuracy, altitude, latitude, longitude) = self.gga?;
+        let (quality_time, accuracy, altitude, latitude, longitude, hdop, satellites) = self.gga?;
         if *time != quality_time
             || position.timestamp_ms <= self.last_timestamp
             || (position.latitude - latitude).abs() > 0.00002
@@ -147,6 +170,16 @@ impl PositionEncoder {
         let mut position = position.clone();
         position.accuracy_m = accuracy;
         position.altitude_m = altitude;
+        let round = |v: f64, d: i32| (v * 10f64.powi(d)).round() / 10f64.powi(d);
+        position.channels = BTreeMap::from([
+            ("gpsSpeedKmh", round(position.speed_mps * 3.6, 2).into()),
+            ("altitudeM", round(altitude, 1).into()),
+            ("accuracyM", round(accuracy, 2).into()),
+            ("hdop", hdop.into()),
+        ]);
+        if let Some(n) = satellites {
+            position.channels.insert("satellitesUsed", n.into());
+        }
         position.sequence = self.sequence;
         self.sequence += 1;
         self.last_timestamp = position.timestamp_ms;
@@ -171,6 +204,14 @@ mod tests {
             let packet: serde_json::Value =
                 serde_json::from_str(&encoder.sentence(&nmea(b)).unwrap()).unwrap();
             assert_eq!(packet["accuracyM"], 4.0);
+            assert_eq!(packet["source"], "nmea", "released apps require it");
+            assert_eq!(packet["bootId"], boot_id());
+            let channels = &packet["channels"];
+            assert_eq!(channels["satellitesUsed"], 12);
+            assert_eq!(channels["hdop"], 0.8);
+            assert_eq!(channels["altitudeM"], 12.0);
+            assert_eq!(channels["accuracyM"], 4.0);
+            assert!((channels["gpsSpeedKmh"].as_f64().unwrap() - 92.6).abs() < 0.01);
             assert_eq!(packet["timestampMs"], 1790164800100_i64);
             assert!((packet["speedMps"].as_f64().unwrap() - 25.722222).abs() < 0.0001);
             assert!(encoder.sentence(&nmea(RMC)).is_none());
