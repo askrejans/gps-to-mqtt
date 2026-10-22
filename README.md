@@ -136,13 +136,23 @@ init_commands  = ["PUBX,40,GLL,0,0,0,0"]
 
 ### MQTT
 
+**Base topic** (`<base>` below), first match wins:
+
+| Setting | `<base>` | Use |
+|---------|----------|-----|
+| `mqtt_base_topic = "/CAR/GPS"` (or `GPS_TO_MQTT_MQTT_BASE_TOPIC`) | `/CAR/GPS` | explicit, as before |
+| `car = "golf86"` (or `GPS_TO_MQTT_CAR`) | `/g86/golf86/gps` | G86 car computer namespace (`/g86/<car>/…`); g86-logger sets it |
+| neither | `/GOLF86/GPS` | legacy default, unchanged for existing installs |
+
+`car` is a slug: `^[a-z0-9][a-z0-9-]{0,31}$`. The resolved base is logged at start.
+
 Select any combination with `mqtt_formats`:
 
 | Format | Topics | Notes |
 |--------|--------|-------|
 | `legacy` | `<base>/LAT`, `/LNG`, `/MGRS`, `/MGRS_8`, `/ALT`, `/SPD`, `/SPD_KPH`, `/SPD_MPH`, `/SPD_KTS`, `/CRS`, `/SATS`, `/HDOP`, `/VDOP`, `/PDOP`, `/QTY`, `/TME`, `/DTE`, `/SAT/GLOBAL/NUM`, `/SAT/VEHICLES/<G07…>`, telemetry `/ACCEL_*`, `/COMBINED_G`, `/HEADING_RATE`, `/DISTANCE`, `/MAX_SPEED`, `/BRAKING` | One retained value per topic, published only on change |
 | `json` | `<base>/fix`, `<base>/sky` | Full fix (explicit units: `speed_mps`, `altitude_m`, `accuracy_m` + `accuracy_source`, `mgrs`, `mgrs_8`, `position_held`, `telemetry`) and satellites |
-| `g86` | `<base>/position` | G86 app external-GPS packet (schema 1), never retained, never throttled |
+| `g86` | `<base>/position` | G86 app external-GPS packet (schema 1), never retained, never throttled; `channels` carries `gpsSpeedKmh`, `altitudeM`, `accuracyM`, `hdop`, `satellitesUsed` |
 | `homeassistant` | `homeassistant/device_tracker/…`, `homeassistant/sensor/…` | Discovery: location tracker plus speed, altitude, satellites, HDOP, accuracy, fix quality/mode, MGRS |
 | `owntracks` | `owntracks/gps-to-mqtt/<base>` | `_type: location` for Home Assistant, Traccar, OwnTracks Recorder |
 
@@ -162,7 +172,22 @@ there is nothing new, the request is held until the next sample (at most
 Per reply topic, answers are limited by a token bucket (bursts of 12, 100 a
 second on average), for up to 32 reply topics.
 
-`<base>/status` is `online`/`offline` (retained, with a last will). Use
+`<base>/status` is `online`/`offline` (retained, with a last will).
+`<base>/health` (retained JSON, every 5 s and on change) is the bridge health of
+the G86 car computer: `state` (`ok` / `degraded` / `down`), receiver `link`,
+position `rateHz` and `ageMs`, fresh `channels`, `errors` (`checksum`,
+`malformed`, `reconnects`, `archive`, cumulative), `clockSynced`, `fix`:
+
+```json
+{"schema":1,"bridge":"gps-to-mqtt","version":"0.7.3","bootId":"4121-1792664120000000",
+ "timestampMs":1792664130000,"state":"ok","link":"connected","sources":["gps-to-mqtt"],
+ "rateHz":10.0,"ageMs":42,"channels":["accuracyM","altitudeM","gpsSpeedKmh","hdop","satellitesUsed"],
+ "errors":{"archive":0,"checksum":0,"malformed":0,"reconnects":0},"clockSynced":true,"fix":true}
+```
+
+`down`: receiver link not connected or no sentence for 10 s. `degraded`: no
+valid fix, last position older than 2 s, or an error counter rose in the last
+5 s. Consumers treat a health message older than 15 s as down. Use
 `mqtt_max_rate_hz` to throttle state topics on slow links. TLS: `mqtt_use_tls`,
 `mqtt_ca_file`, and `mqtt_client_cert_file` + `mqtt_client_key_file` for
 mutual TLS. Use `mqtt_password_file` for Docker/systemd secrets.

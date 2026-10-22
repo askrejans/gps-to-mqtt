@@ -151,9 +151,16 @@ dynamics.
 
 ### 4.1 MQTT
 
-All topics are under `mqtt_base_topic` (trailing `/` removed).
+All topics are under the resolved base (trailing `/` removed): `mqtt_base_topic`
+when set, else `/g86/<car>/gps` when `car` is set, else the legacy `/GOLF86/GPS`.
 
 * **`<base>/status`**: `online` / `offline`, retained, QoS 1. `offline` is also the last will.
+* **`<base>/health`**: retained JSON, QoS 1, every 5 s and at once when `state`
+  or `link` changes; a final `down` before the clean-shutdown `offline`
+  (G86 `contracts/CAR_COMPUTER.md` §2, `src/health.rs`). `rateHz`/`ageMs`/`channels`
+  describe published `<base>/position` packets; `errors` are cumulative
+  `checksum`, `malformed`, `reconnects` (receiver link losses), `archive`;
+  `clockSynced` is the kernel NTP state (`adjtimex`) on Linux, `true` elsewhere.
 * **`legacy`**: retained, change-detected scalar topics, names and number formats unchanged from 0.6:
   `LAT LNG MGRS MGRS_8 ALT ALT_FT SPD SPD_KPH SPD_MPH SPD_KTS CRS SATS SAT/GLOBAL/NUM HDOP VDOP PDOP QTY TME DTE POSITION_ACCURACY TRUE_HEADING HEADING_RATE_GPS`,
   telemetry `ACCEL_LONG_MPS2 ACCEL_LONG_G ACCEL_LAT_MPS2 ACCEL_LAT_G COMBINED_G HEADING_RATE DISTANCE MAX_SPEED MAX_SPEED_MPH BRAKING`,
@@ -167,7 +174,10 @@ All topics are under `mqtt_base_topic` (trailing `/` removed).
   is satellites with `used` flags and DOPs.
 * **`g86`**: `<base>/position`, never retained (schema 1, unchanged): `schema,
   source, bootId, sequence, timestampMs, latitude, longitude, speedMps,
-  headingDeg, accuracyM, altitudeM, accuracySource`. Produced only when RMC and
+  headingDeg, accuracyM, altitudeM, accuracySource` plus (0.7.3, additive)
+  `channels: {gpsSpeedKmh, altitudeM, accuracyM, hdop, satellitesUsed}` in
+  registry names. `source` stays `nmea` (released G86 apps require it); `bootId`
+  is the same as on `<base>/health`. Produced only when RMC and
   GGA of the same epoch agree (time, position within 2e-5°), RMC is `A`, GGA
   quality is 1–5 and checksums match. Not throttled.
 * **`homeassistant`**: retained discovery documents under

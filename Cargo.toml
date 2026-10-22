@@ -1,6 +1,6 @@
 [package]
 name = "gps-to-mqtt"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 rust-version = "1.89"
 authors = ["askrejans"]
@@ -49,6 +49,10 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 
 # HTTP API (health, Prometheus text exposition, REST, SSE)
 axum = "0.8.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Kernel clock state (adjtimex) for `<base>/health` clockSynced
+libc = "0.2.191"
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

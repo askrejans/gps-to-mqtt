@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.3
+
+### Added
+- `car` setting (`GPS_TO_MQTT_CAR`): the G86 car computer namespace. With
+  `car = "golf86"` and no `mqtt_base_topic`, the base topic is
+  `/g86/golf86/gps` (position on `/g86/golf86/gps/position`). An explicit
+  `mqtt_base_topic` still wins, and with neither set the base stays
+  `/GOLF86/GPS`: existing installs are unchanged. The resolved base is logged
+  at start.
+- `<base>/health`: retained bridge health JSON for the G86 car computer
+  (`state` ok/degraded/down, receiver `link`, position `rateHz` and `ageMs`,
+  fresh `channels`, cumulative `errors`, `clockSynced`, `fix`), every 5 s and
+  on change, with a final `down` before a clean shutdown.
+- `<base>/position` packets carry a `channels` map in channel-registry names
+  (`gpsSpeedKmh`, `altitudeM`, `accuracyM`, `hdop`, `satellitesUsed`).
+  Additive: every existing field, including `source: "nmea"`, is unchanged.
+
 ## 0.7.2
 
 ### Changed
