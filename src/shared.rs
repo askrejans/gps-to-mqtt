@@ -56,6 +56,8 @@ pub struct Counters {
     pub mqtt_dropped: AtomicU64,
     pub archive_errors: AtomicU64,
     pub clients: AtomicU64,
+    /// Receiver link losses (connected → anything else).
+    pub reconnects: AtomicU64,
 }
 
 impl Counters {
@@ -179,6 +181,9 @@ impl Shared {
     pub fn set_source(&self, status: LinkStatus, detail: impl Into<String>) {
         let detail = detail.into();
         let mut s = self.write();
+        if s.source == LinkStatus::Connected && status != LinkStatus::Connected {
+            Counters::inc(&self.counters.reconnects);
+        }
         if s.source != status {
             s.source = status;
             s.source_since = Instant::now();

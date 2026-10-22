@@ -11,7 +11,9 @@
 //! | `owntracks`     | `owntracks/<user>/<device>`                 | yes      |
 //!
 //! Availability: `<base>/status` is `online`/`offline` (retained; `offline` is the
-//! broker-published last will).
+//! broker-published last will). `<base>/health` (retained JSON, every 5 s and on
+//! change) describes the receiver link, position rate/age and error counters for
+//! the G86 car computer (see [`crate::health`]).
 //!
 //! **On demand** (for consumers on slow links, such as the G86 display): a
 //! message on `<base>/position/get` whose payload is a reply topic is answered
@@ -25,6 +27,7 @@
 //! after reconnecting.
 
 use crate::config::{AppConfig, MqttFormat};
+use crate::health::{HealthTracker, Inputs};
 use crate::models::{
     AccuracySource, Constellation, Fix, M_TO_FT, MPS_TO_KNOTS, MPS_TO_KPH, MPS_TO_MPH, Sky,
 };
@@ -251,7 +254,7 @@ pub fn owntracks(fix: &Fix, tid: &str) -> Option<String> {
 
 /// Home Assistant MQTT discovery documents.
 pub fn homeassistant_discovery(config: &AppConfig, client: &str) -> Vec<Msg> {
-    let base = config.base_topic();
+    let base = &config.base_topic();
     let node = sanitize(
         &config
             .mqtt_client_id
@@ -553,16 +556,18 @@ pub async fn run(config: AppConfig, shared: Arc<Shared>, cancel: CancellationTok
     let opts = options(&config, &id)?;
     let (client, mut eventloop) = AsyncClient::new(opts, 1024);
     let (conn_tx, conn_rx) = watch::channel(0u64);
-    info!("MQTT client {id} → {}", config.mqtt_address());
+    info!(
+        "MQTT client {id} → {}, base topic {} ({})",
+        config.mqtt_address(),
+        config.base_topic(),
+        config.base_topic_origin()
+    );
 
     // Event loop: drives the connection, reconnects with backoff.
     let el_shared = shared.clone();
     let el_cancel = cancel.clone();
     let el_client = client.clone();
-    let demand_topic = format!(
-        "{}/position/get",
-        config.mqtt_base_topic.trim_end_matches('/')
-    );
+    let demand_topic = format!("{}/position/get", config.base_topic());
     let max_attempts = config.mqtt_reconnect_max_attempts;
     let event_loop = tokio::spawn(async move {
         let mut answered: HashMap<String, DemandClient> = HashMap::new();
@@ -679,6 +684,7 @@ struct Publisher {
     last_state_publish: Option<Instant>,
     latest_fix: Option<Arc<Fix>>,
     latest_sky: Option<Arc<Sky>>,
+    health: HealthTracker,
 }
 
 impl Publisher {
@@ -686,7 +692,7 @@ impl Publisher {
         let min_interval = (config.mqtt_max_rate_hz > 0.0)
             .then(|| Duration::from_secs_f64(1.0 / config.mqtt_max_rate_hz));
         Self {
-            base: config.base_topic().to_string(),
+            base: config.base_topic(),
             qos: if config.mqtt_qos == 1 {
                 QoS::AtLeastOnce
             } else {
@@ -702,6 +708,7 @@ impl Publisher {
             last_state_publish: None,
             latest_fix: None,
             latest_sky: None,
+            health: HealthTracker::default(),
         }
     }
 
@@ -734,6 +741,47 @@ impl Publisher {
         }
     }
 
+    fn health_inputs(&self) -> Inputs {
+        let c = &self.shared.counters;
+        let s = self.shared.read();
+        let fix_valid = s.fix.as_ref().is_some_and(|f| f.valid)
+            && s.fix_age_s(Instant::now()).is_some_and(|a| a <= 2.0);
+        Inputs {
+            link: s.source,
+            last_data_at: s.last_data_at,
+            fix_valid,
+            errors: [
+                ("checksum", Counters::get(&c.checksum_errors)),
+                ("malformed", Counters::get(&c.malformed)),
+                ("reconnects", Counters::get(&c.reconnects)),
+                ("archive", Counters::get(&c.archive_errors)),
+            ]
+            .into(),
+            clock_synced: crate::clock::synced(),
+        }
+    }
+
+    /// `<base>/health`: when due (5 s / state or link change), or always with `force`.
+    fn publish_health(&mut self, force: bool, shutting_down: bool) {
+        let now = Instant::now();
+        let mut inputs = self.health_inputs();
+        if shutting_down {
+            inputs.link = crate::shared::LinkStatus::Disconnected;
+        }
+        let wall = chrono::Utc::now().timestamp_millis();
+        let (doc, state, link) = self.health.document(now, wall, &inputs);
+        if (force || self.health.due(now, state, link))
+            && self.send(
+                format!("{}/health", self.base),
+                doc.to_string(),
+                true,
+                QoS::AtLeastOnce,
+            )
+        {
+            self.health.sent(now, state, link);
+        }
+    }
+
     fn on_connect(&mut self) {
         self.last.clear();
         self.send(
@@ -742,6 +790,7 @@ impl Publisher {
             true,
             QoS::AtLeastOnce,
         );
+        self.publish_health(true, false);
         if self.config.wants(MqttFormat::Homeassistant) {
             for m in homeassistant_discovery(&self.config, &self.client_id) {
                 self.send(m.topic, m.payload, m.retain, QoS::AtLeastOnce);
@@ -815,9 +864,14 @@ impl Publisher {
         cancel: CancellationToken,
     ) {
         let mut connected = false;
+        let mut health_tick = tokio::time::interval(Duration::from_secs(1));
+        health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
+                _ = health_tick.tick() => {
+                    if connected { self.publish_health(false, false); }
+                }
                 changed = conn.changed() => {
                     if changed.is_err() { break; }
                     let generation = *conn.borrow_and_update();
@@ -834,6 +888,7 @@ impl Publisher {
             }
         }
         if connected {
+            self.publish_health(true, true);
             self.send(
                 format!("{}/status", self.base),
                 "offline".into(),
@@ -869,12 +924,14 @@ impl Publisher {
             BusEvent::G86(packet) if self.config.wants(MqttFormat::G86) => {
                 if connected {
                     // Never retained: G86 rejects retained frames as stale.
-                    self.send(
+                    if self.send(
                         format!("{}/position", self.base),
                         packet.to_string(),
                         false,
                         QoS::AtMostOnce,
-                    );
+                    ) {
+                        self.health.on_position(Instant::now(), &packet);
+                    }
                 } else {
                     Counters::inc(&self.shared.counters.mqtt_dropped);
                 }
@@ -1082,7 +1139,7 @@ mod tests {
     #[test]
     fn homeassistant_discovery_documents() {
         let mut c = AppConfig::default();
-        c.mqtt_base_topic = "/CAR/GPS/".into();
+        c.mqtt_base_topic = Some("/CAR/GPS/".into());
         let msgs = homeassistant_discovery(&c, "id");
         assert_eq!(msgs[0].topic, "homeassistant/device_tracker/car_gps/config");
         let tracker: serde_json::Value = serde_json::from_str(&msgs[0].payload).unwrap();
