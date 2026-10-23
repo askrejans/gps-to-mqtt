@@ -4,6 +4,7 @@
 
 - **Migration:** an unconfigured installation now publishes below `/telemetry/gps` instead of `/GOLF86/GPS`. Set `mqtt_base_topic` explicitly to `/GOLF86/GPS` before upgrading if consumers need the former default. Explicit settings and optional `car` namespaces keep their topics.
 
+- Declare the Linux runtime libraries required by the shipped Debian binary.
 - Document standalone use with arbitrary MQTT brokers and explicit topic prefixes; preserve explicit topic prefixes and telemetry packet contracts.
 - Prefer the neutral `canonical` GPS format name and retain `g86` as a compatible configuration alias.
 
