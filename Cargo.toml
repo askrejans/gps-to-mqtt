@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "embedded", "network-programming"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
 tokio-util = "0.7.20"
 futures-util = "0.3.34"
 
