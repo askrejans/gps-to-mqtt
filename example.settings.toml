@@ -74,9 +74,9 @@ mqtt_host       = "localhost"
 mqtt_port       = 1883
 # Base topic. Explicit mqtt_base_topic wins; else `car` selects the G86 car
 # computer namespace /g86/<car>/gps (position on /g86/<car>/gps/position);
-# with neither set the legacy default /GOLF86/GPS is used.
+# with neither set the default /telemetry/gps is used.
 # car = "golf86"                         # ^[a-z0-9][a-z0-9-]{0,31}$
-# mqtt_base_topic = "/GOLF86/GPS"
+# mqtt_base_topic = "/telemetry/gps"
 # mqtt_client_id = "gps-to-mqtt-car1"   # default: unique per process
 
 # What to publish (any combination):

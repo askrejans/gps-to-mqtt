@@ -12,7 +12,7 @@ as a systemd service or interactively with a terminal dashboard.
 
 This bridge can publish to any MQTT broker. Configure the broker host, credentials and `mqtt_base_topic` for your own installation; use TLS for a broker reached across an untrusted network. The source distribution and ordinary binaries have no account, subscription or activation dependency. Product-specific subscription checks belong to separately built managed distributions.
 
-For a custom namespace, set `mqtt_base_topic` explicitly (for example `/telemetry/car-1/gps`). An explicit prefix takes precedence over `car`. The optional legacy `car` shortcut keeps its existing `/g86/<car>/…` namespace for compatibility; omitting it does not create an account or select a vehicle profile. Existing defaults and packet fields remain compatible.
+For a custom namespace, set `mqtt_base_topic` explicitly (for example `/telemetry/car-1/gps`). An explicit prefix takes precedence over `car`. The optional legacy `car` shortcut keeps its existing `/g86/<car>/…` namespace for compatibility; omitting it does not create an account or select a vehicle profile. Packet fields remain compatible. Fresh installations use `/telemetry/gps`; to keep the former default, explicitly set the prefix to `/GOLF86/GPS` before upgrading.
 
 ## Highlights
 
@@ -148,7 +148,7 @@ init_commands  = ["PUBX,40,GLL,0,0,0,0"]
 |---------|----------|-----|
 | `mqtt_base_topic = "/CAR/GPS"` (or `GPS_TO_MQTT_MQTT_BASE_TOPIC`) | `/CAR/GPS` | explicit, as before |
 | `car = "golf86"` (or `GPS_TO_MQTT_CAR`) | `/g86/golf86/gps` | G86 car computer namespace (`/g86/<car>/…`); g86-logger sets it |
-| neither | `/GOLF86/GPS` | legacy default, unchanged for existing installs |
+| neither | `/telemetry/gps` | generic default; set the former prefix explicitly when upgrading |
 
 `car` is a slug: `^[a-z0-9][a-z0-9-]{0,31}$`. The resolved base is logged at start.
 

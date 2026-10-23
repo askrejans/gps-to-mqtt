@@ -114,7 +114,7 @@ pub struct AppConfig {
     /// Client ID; auto-generated (unique per process) when unset.
     pub mqtt_client_id: Option<String>,
     /// Explicit base topic. Unset: `/g86/<car>/gps` when `car` is set, else
-    /// the legacy `/GOLF86/GPS`.
+    /// the default `/telemetry/gps`.
     #[serde(default)]
     pub mqtt_base_topic: Option<String>,
     /// Car slug (`golf86`): selects the G86 car-computer namespace `/g86/<car>/gps`.
@@ -252,7 +252,7 @@ fn default_mqtt_port() -> u16 {
     1883
 }
 /// Base topic when neither `mqtt_base_topic` nor `car` is set (unchanged since 0.5).
-pub const LEGACY_BASE_TOPIC: &str = "/GOLF86/GPS";
+pub const DEFAULT_BASE_TOPIC: &str = "/telemetry/gps";
 
 /// G86 car slug: `^[a-z0-9][a-z0-9-]{0,31}$`.
 pub fn valid_car(car: &str) -> bool {
@@ -519,7 +519,7 @@ impl AppConfig {
         match (&self.mqtt_base_topic, &self.car) {
             (Some(base), _) => base.trim_end_matches('/').to_string(),
             (None, Some(car)) => format!("/g86/{car}/gps"),
-            (None, None) => LEGACY_BASE_TOPIC.to_string(),
+            (None, None) => DEFAULT_BASE_TOPIC.to_string(),
         }
     }
 
@@ -528,7 +528,7 @@ impl AppConfig {
         match (&self.mqtt_base_topic, &self.car) {
             (Some(_), _) => "mqtt_base_topic",
             (None, Some(_)) => "car",
-            (None, None) => "legacy default",
+            (None, None) => "default",
         }
     }
 
@@ -870,12 +870,28 @@ mod tests {
     }
 
     #[test]
-    fn base_topic_explicit_then_car_then_legacy() {
-        // Existing installs (nothing set) keep the legacy topic.
+    fn base_topic_explicit_then_car_then_default() {
+        // Unconfigured installations use the generic namespace.
         let f = toml("");
         let c = build(Some(f.path()), env(&[])).unwrap();
-        assert_eq!(c.base_topic(), "/GOLF86/GPS");
-        assert_eq!(c.base_topic_origin(), "legacy default");
+        assert_eq!(c.base_topic(), "/telemetry/gps");
+        assert_eq!(c.base_topic_origin(), "default");
+        let old = toml(r#"mqtt_base_topic = "/GOLF86/GPS""#);
+        assert_eq!(
+            build(Some(old.path()), env(&[])).unwrap().base_topic(),
+            "/GOLF86/GPS"
+        );
+        let paths = search_paths();
+        assert!(
+            paths
+                .iter()
+                .position(|p| p == Path::new("/etc/g86-car-telemetry/gps-to-mqtt.toml"))
+                .unwrap()
+                < paths
+                    .iter()
+                    .position(|p| p == Path::new("/etc/gps-to-mqtt/settings.toml"))
+                    .unwrap()
+        );
         // `car` selects the G86 namespace, from the file or the environment.
         let f = toml(r#"car = "qa-car""#);
         let c = build(Some(f.path()), env(&[])).unwrap();
