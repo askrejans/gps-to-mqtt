@@ -8,6 +8,12 @@ as a systemd service or interactively with a terminal dashboard.
 
 ![gps](https://github.com/user-attachments/assets/14f42bc3-59a6-4973-99da-32b818c8b44e)
 
+## Standalone MQTT use
+
+This bridge can publish to any MQTT broker. Configure the broker host, credentials and `mqtt_base_topic` for your own installation; use TLS for a broker reached across an untrusted network. The source distribution and ordinary binaries have no account, subscription or activation dependency. Product-specific subscription checks belong to separately built managed distributions.
+
+For a custom namespace, set `mqtt_base_topic` explicitly (for example `/telemetry/car-1/gps`). An explicit prefix takes precedence over `car`. The optional legacy `car` shortcut keeps its existing `/g86/<car>/…` namespace for compatibility; omitting it does not create an account or select a vehicle profile. Existing defaults and packet fields remain compatible.
+
 ## Highlights
 
 - **Zero configuration for USB receivers.** `port_name = "auto"` finds the receiver
@@ -152,7 +158,7 @@ Select any combination with `mqtt_formats`:
 |--------|--------|-------|
 | `legacy` | `<base>/LAT`, `/LNG`, `/MGRS`, `/MGRS_8`, `/ALT`, `/SPD`, `/SPD_KPH`, `/SPD_MPH`, `/SPD_KTS`, `/CRS`, `/SATS`, `/HDOP`, `/VDOP`, `/PDOP`, `/QTY`, `/TME`, `/DTE`, `/SAT/GLOBAL/NUM`, `/SAT/VEHICLES/<G07…>`, telemetry `/ACCEL_*`, `/COMBINED_G`, `/HEADING_RATE`, `/DISTANCE`, `/MAX_SPEED`, `/BRAKING` | One retained value per topic, published only on change |
 | `json` | `<base>/fix`, `<base>/sky` | Full fix (explicit units: `speed_mps`, `altitude_m`, `accuracy_m` + `accuracy_source`, `mgrs`, `mgrs_8`, `position_held`, `telemetry`) and satellites |
-| `g86` | `<base>/position` | G86 app external-GPS packet (schema 1), never retained, never throttled; `channels` carries `gpsSpeedKmh`, `altitudeM`, `accuracyM`, `hdop`, `satellitesUsed` |
+| `canonical` (`g86` accepted) | `<base>/position` | canonical external-GPS packet (schema 1), never retained, never throttled; `channels` carries `gpsSpeedKmh`, `altitudeM`, `accuracyM`, `hdop`, `satellitesUsed` |
 | `homeassistant` | `homeassistant/device_tracker/…`, `homeassistant/sensor/…` | Discovery: location tracker plus speed, altitude, satellites, HDOP, accuracy, fix quality/mode, MGRS |
 | `owntracks` | `owntracks/gps-to-mqtt/<base>` | `_type: location` for Home Assistant, Traccar, OwnTracks Recorder |
 

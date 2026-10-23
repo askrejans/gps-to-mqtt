@@ -55,7 +55,8 @@ pub enum MqttFormat {
     Legacy,
     /// `<base>/fix` and `<base>/sky` JSON documents
     Json,
-    /// `<base>/position` G86 external-GPS packet (schema 1)
+    /// `<base>/position` canonical GPS packet (schema 1).
+    #[serde(rename = "canonical", alias = "g86")]
     G86,
     /// Home Assistant MQTT discovery (device_tracker + sensors, uses JSON topics)
     Homeassistant,
@@ -421,7 +422,7 @@ impl AppConfig {
             }
             if self.mqtt_formats.is_empty() {
                 bail!(
-                    "mqtt_formats must list at least one of legacy, json, g86, homeassistant, owntracks"
+                    "mqtt_formats must list at least one of legacy, json, canonical (or g86), homeassistant, owntracks"
                 );
             }
             if !(self.mqtt_max_rate_hz.is_finite() && self.mqtt_max_rate_hz >= 0.0) {
@@ -713,6 +714,22 @@ mod tests {
             fn drop(&mut self) {
                 let _ = std::fs::remove_file(&self.0);
             }
+        }
+    }
+
+    #[test]
+    fn canonical_format_keeps_the_legacy_name_and_custom_namespace() {
+        for format in ["canonical", "g86"] {
+            let file = toml(&format!(
+                "mqtt_formats = [\"{format}\"]\nmqtt_base_topic = \"/telemetry/rover/gps\"\ncar = \"legacy-car\""
+            ));
+            let config = build(Some(file.path()), env(&[])).unwrap();
+            assert!(config.wants(MqttFormat::G86));
+            assert_eq!(config.base_topic(), "/telemetry/rover/gps");
+            assert_eq!(
+                serde_json::to_value(config.mqtt_formats).unwrap(),
+                serde_json::json!(["canonical"])
+            );
         }
     }
 

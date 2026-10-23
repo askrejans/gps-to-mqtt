@@ -335,7 +335,7 @@ mod tests {
                 source: "auto @ auto baud".into(),
                 receiver: "ublox @ 10 hz".into(),
                 mqtt: Some("localhost:1883".into()),
-                outputs: vec!["mqtt://localhost:1883 [legacy,json,g86]".into()],
+                outputs: vec!["mqtt://localhost:1883 [legacy,json,canonical]".into()],
             },
             uptime: Duration::from_secs(3723),
             replay: false,

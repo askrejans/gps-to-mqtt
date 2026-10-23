@@ -271,7 +271,7 @@ pub fn homeassistant_discovery(config: &AppConfig, client: &str) -> Vec<Msg> {
     let device = json!({
         "identifiers": [format!("gps_to_mqtt_{node}")],
         "name": format!("GNSS {base}"),
-        "manufacturer": "G86 Racing",
+        "manufacturer": "gps-to-mqtt",
         "model": "gps-to-mqtt",
         "sw_version": env!("CARGO_PKG_VERSION"),
     });

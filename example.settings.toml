@@ -82,14 +82,14 @@ mqtt_port       = 1883
 # What to publish (any combination):
 #   legacy        <base>/LAT, /LNG, /SPD … one retained value per topic (G86 dashboard)
 #   json          <base>/fix and <base>/sky JSON documents
-#   g86           <base>/position — G86 app external-GPS packet (never retained)
+#   canonical     <base>/position — timestamped GPS packet (never retained; legacy name: g86)
 #   homeassistant Home Assistant MQTT discovery (device_tracker + sensors)
 #   owntracks     OwnTracks location messages (Home Assistant, Traccar, Recorder)
-mqtt_formats = ["legacy", "json", "g86"]
+mqtt_formats = ["legacy", "json", "canonical"]
 
 mqtt_qos         = 0        # 0 or 1 for data topics
 mqtt_retain      = true     # retain legacy/json state topics
-mqtt_max_rate_hz = 0        # throttle legacy/json/owntracks (0 = every fix; g86 never throttled)
+mqtt_max_rate_hz = 0        # throttle legacy/json/owntracks (0 = every fix; canonical never throttled)
 mqtt_keep_alive_s = 30
 mqtt_reconnect_max_attempts = 0   # 0 = retry forever
 

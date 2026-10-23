@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.4
+
+- Document standalone use with arbitrary MQTT brokers and explicit topic prefixes; keep existing topic and telemetry contracts unchanged.
+- Prefer the neutral `canonical` GPS format name and retain `g86` as a compatible configuration alias.
+
 ## 0.7.3
 
 ### Added

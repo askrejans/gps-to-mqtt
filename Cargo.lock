@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "gps-to-mqtt"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "axum",
